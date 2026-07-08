@@ -827,7 +827,7 @@ class MainWindow(QMainWindow):
                 self._models_ready = False
                 self._refresh_live_start_button()
                 self._set_live_status("正在预热参考音色...", "busy")
-                self.live_preload_requested.emit(path)
+                self.live_preload_requested.emit(self._build_live_preload_payload(path))
             else:
                 self._pending_reference_preload = True
                 self._refresh_live_start_button()
@@ -1280,6 +1280,17 @@ class MainWindow(QMainWindow):
             Q_ARG(bool, checked)
         )
 
+    def _build_live_preload_payload(self, reference_audio_path: str | None = None) -> dict[str, str]:
+        reference_path = (
+            self.live_reference_audio_edit.text().strip()
+            if reference_audio_path is None
+            else str(reference_audio_path).strip()
+        )
+        return {
+            "reference_audio_path": reference_path,
+            "input_mode": self._current_input_mode(),
+        }
+
     def _on_live_start_clicked(self) -> None:
         input_mode = self._current_input_mode()
         if input_mode == "microphone" and self._live_worker is not None and self._live_worker._busy:
@@ -1370,7 +1381,7 @@ class MainWindow(QMainWindow):
         self._live_worker.finished.connect(self._on_live_finished)
         self._live_worker.error.connect(self._on_worker_error)
         self._live_worker_thread.start()
-        self.live_preload_requested.emit(self.live_reference_audio_edit.text().strip())
+        self.live_preload_requested.emit(self._build_live_preload_payload())
 
     def _shutdown_live_backend(self) -> None:
         if self._live_worker_thread is None:
@@ -1393,7 +1404,7 @@ class MainWindow(QMainWindow):
             self._models_ready = False
             self._refresh_live_start_button()
             self._set_live_status("正在预热参考音色...", "busy")
-            self.live_preload_requested.emit(self.live_reference_audio_edit.text().strip())
+            self.live_preload_requested.emit(self._build_live_preload_payload())
             return
         self._refresh_live_start_button()
         self._set_live_status("引擎已就绪，等待开始", "ready")

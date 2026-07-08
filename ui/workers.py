@@ -608,7 +608,19 @@ class LiveSpeechWorker(QObject):
         )
         return input_device, audio_format
 
-    def preload_models(self, reference_audio_path: str | None = None) -> None:
+    def preload_models(self, payload: object = None) -> None:
+        reference_audio_path: str | None = None
+        input_mode = "microphone"
+        if isinstance(payload, dict):
+            raw_reference_audio_path = payload.get("reference_audio_path")
+            if isinstance(raw_reference_audio_path, str):
+                reference_audio_path = raw_reference_audio_path.strip() or None
+            raw_input_mode = payload.get("input_mode")
+            if isinstance(raw_input_mode, str) and raw_input_mode.strip():
+                input_mode = raw_input_mode.strip()
+        elif isinstance(payload, str):
+            reference_audio_path = payload.strip() or None
+
         if self._models_ready:
             if reference_audio_path and reference_audio_path != self.reference_audio_path:
                 self.reference_audio_path = reference_audio_path
@@ -623,12 +635,17 @@ class LiveSpeechWorker(QObject):
 
         try:
             self._reset_emit_cache()
-            self._ensure_asr_loaded(emit_status=True)
+            if input_mode != "text":
+                self._ensure_asr_loaded(emit_status=True)
             self._ensure_tts_loaded(emit_status=True, warmup_reference=True)
             self._models_ready = True
-            self._emit_status("语音引擎已就绪，可以开始变声。")
+            if input_mode == "text":
+                self._emit_status("文本模式引擎已就绪，可以开始合成。")
+            else:
+                self._emit_status("语音引擎已就绪，可以开始变声。")
             self.ready.emit()
-            self._schedule_idle_unload("asr")
+            if self.asr_service is not None:
+                self._schedule_idle_unload("asr")
             self._schedule_idle_unload("tts")
         except Exception as exc:
             logger.exception("预加载模型失败")

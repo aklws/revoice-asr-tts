@@ -16,8 +16,9 @@ DEFAULT_TTS_DEVICE = "cuda"
 DEFAULT_ASR_DEVICE = "cpu"
 DEFAULT_EMOTION_DEVICE = "cpu"
 DEFAULT_TTS_MAX_NEW_TOKENS = 2048
-DEFAULT_LIVE_ASR_IDLE_UNLOAD_SEC = 90.0
-DEFAULT_LIVE_TTS_IDLE_UNLOAD_SEC = 120.0
+MIN_LIVE_IDLE_UNLOAD_SEC = 3600.0
+DEFAULT_LIVE_ASR_IDLE_UNLOAD_SEC = MIN_LIVE_IDLE_UNLOAD_SEC
+DEFAULT_LIVE_TTS_IDLE_UNLOAD_SEC = MIN_LIVE_IDLE_UNLOAD_SEC
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +83,17 @@ def _resolve_positive_float_env(name: str, default: float) -> float:
 
 
 def resolve_live_asr_idle_unload_sec() -> float:
-    return _resolve_positive_float_env("LIVE_ASR_IDLE_UNLOAD_SEC", DEFAULT_LIVE_ASR_IDLE_UNLOAD_SEC)
+    return max(
+        MIN_LIVE_IDLE_UNLOAD_SEC,
+        _resolve_positive_float_env("LIVE_ASR_IDLE_UNLOAD_SEC", DEFAULT_LIVE_ASR_IDLE_UNLOAD_SEC),
+    )
 
 
 def resolve_live_tts_idle_unload_sec() -> float:
-    return _resolve_positive_float_env("LIVE_TTS_IDLE_UNLOAD_SEC", DEFAULT_LIVE_TTS_IDLE_UNLOAD_SEC)
+    return max(
+        MIN_LIVE_IDLE_UNLOAD_SEC,
+        _resolve_positive_float_env("LIVE_TTS_IDLE_UNLOAD_SEC", DEFAULT_LIVE_TTS_IDLE_UNLOAD_SEC),
+    )
 
 
 @lru_cache(maxsize=1)
