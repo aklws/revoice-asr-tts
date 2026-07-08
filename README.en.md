@@ -59,6 +59,11 @@
 uv sync
 ```
 
+Prepare the extra runtime dependencies manually:
+
+- `ffmpeg`: install it into your system `PATH`, or place it at `bin/ffmpeg/bin/ffmpeg.exe`
+- `flash_attn`: download a build that matches your environment from this project's GitHub Releases and install it manually
+
 ### 2. Prepare Models
 
 The app uses the following default directories:

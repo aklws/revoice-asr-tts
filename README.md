@@ -59,6 +59,11 @@
 uv sync
 ```
 
+额外运行时依赖请手动准备：
+
+- `ffmpeg`：请自行安装到系统 `PATH`，或手动放到 `bin/ffmpeg/bin/ffmpeg.exe`
+- `flash_attn`：请从本项目 GitHub Releases 下载与你环境匹配的版本后手动安装
+
 ### 2. 准备模型
 
 默认会使用以下目录：
