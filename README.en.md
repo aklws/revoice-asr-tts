@@ -119,7 +119,7 @@ uv run python main.py
 ## Model Notes
 
 - Models are checked during startup
-- `IndexTTS-2` and `emotion2vec+` can be prepared automatically when missing
+- `IndexTTS-2` and `emotion2vec+` are auto-prepared through `ModelScope` when missing
 - `Qwen3 ASR` runtime assets must be placed manually in `bin/Qwen3-ASR-Transcribe/model`
 - This public source repository does not include the local `bin/` runtime directory
 - In packaged builds, `ModelScope` modules are explicitly imported in code to avoid registry loss issues

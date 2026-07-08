@@ -124,7 +124,7 @@ QWidget {{
     background: {widget_bg};
     color: {text};
     font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-    font-size: 13px;
+    font-size: 12px;
 }}
 
 QMainWindow {{
@@ -151,7 +151,7 @@ QGroupBox::title {{
     padding: 0 8px;
     color: {group_title};
     background: transparent;
-    font-size: 14px;
+    font-size: 13px;
 }}
 
 QLineEdit,
@@ -231,7 +231,7 @@ QLabel {{
 
 QLabel#HeroTitle {{
     color: {hero_title};
-    font-size: 28px;
+    font-size: 26px;
     font-weight: 800;
 }}
 
@@ -271,7 +271,7 @@ QLabel#StatChip {{
 
 QLabel#SectionLead {{
     color: {text};
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
 }}
 
@@ -306,7 +306,7 @@ QLabel#SummaryValue,
 QLabel#DetailValue,
 QLabel#DashboardValue {{
     color: {text};
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 700;
 }}
 
@@ -349,12 +349,6 @@ QFrame#EmotionSliderCard:hover {{
     border: 1px solid {button_hover_border};
 }}
 
-QFrame#WorkspaceCanvas {{
-    background: {surface_bg_alt};
-    border: 1px solid {surface_border};
-    border-radius: 14px;
-}}
-
 QLabel#WorkspaceBadge {{
     background: {hero_chip_bg};
     color: {hero_chip_text};
@@ -374,7 +368,7 @@ QLabel#WorkspaceStat {{
 
 QLabel#CardTitle {{
     color: {group_title};
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 700;
 }}
 
@@ -388,7 +382,7 @@ QLabel#LiveStatusLabel {{
     border: 1px solid {warning_border};
     border-radius: 10px;
     padding: 12px;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 700;
 }}
 
@@ -461,7 +455,7 @@ QLabel#EmotionSliderName {{
 
 QLabel#EmotionSliderValue {{
     color: {muted_text};
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     min-width: 40px;
 }}
@@ -474,7 +468,7 @@ QPushButton#PrimaryActionButton {{
     );
     color: #ffffff;
     border: 1px solid {primary_border};
-    font-size: 16px;
+    font-size: 15px;
     padding: 14px 18px;
 }}
 
@@ -530,7 +524,7 @@ QPushButton#EmotionNavButton {{
     border-radius: 8px;
     padding: 10px 14px;
     text-align: left;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
 }}
 

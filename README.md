@@ -119,7 +119,7 @@ uv run python main.py
 ## 模型说明
 
 - 启动时会检查模型是否存在
-- `IndexTTS-2` 和 `emotion2vec+` 缺失时支持自动准备
+- `IndexTTS-2` 和 `emotion2vec+` 缺失时支持通过 `ModelScope` 自动准备
 - `Qwen3 ASR` 运行时资源需手动放到 `bin/Qwen3-ASR-Transcribe/model`
 - 当前公开源码仓库不包含 `bin/` 本地运行时目录
 - 打包环境下，`ModelScope` 相关模块会在代码中显式导入，以避免注册表缺失问题

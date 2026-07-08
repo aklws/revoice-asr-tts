@@ -45,7 +45,7 @@ from ui.workers import LiveSpeechWorker
 
 
 logger = get_logger(__name__)
-APP_VERSION = "v0.0.1"
+APP_VERSION = "v0.0.2"
 APP_DISPLAY_NAME = f"Revoice ASR-TTS {APP_VERSION}"
 SETTINGS_ICON_PATH = get_bundle_file("ui", "assets", "settings_gear.svg")
 EMOTION_PRESETS: tuple[tuple[str, str | None], ...] = (
@@ -586,11 +586,6 @@ class MainWindow(QMainWindow):
 
     def _build_workspace_panel(self) -> QFrame:
         card, layout = self._create_content_card("文本与波形", "右下同时展示文本输入或识别结果，以及当前生成的声波。")
-        workspace_canvas = QFrame()
-        workspace_canvas.setObjectName("WorkspaceCanvas")
-        canvas_layout = QVBoxLayout(workspace_canvas)
-        canvas_layout.setContentsMargins(14, 14, 14, 14)
-        canvas_layout.setSpacing(12)
 
         header_row = QHBoxLayout()
         header_row.setSpacing(8)
@@ -601,14 +596,14 @@ class MainWindow(QMainWindow):
         self.transcript_intro_label.setWordWrap(True)
         header_row.addWidget(self.workspace_mode_badge)
         header_row.addWidget(self.transcript_intro_label, stretch=1)
-        canvas_layout.addLayout(header_row)
+        layout.addLayout(header_row)
 
         self.live_transcript_view = QTextEdit()
         self.live_transcript_view.setObjectName("TranscriptView")
         self.live_transcript_view.setReadOnly(True)
         self.live_transcript_view.setPlaceholderText("这里会显示实时识别结果。")
         self.live_transcript_view.textChanged.connect(self._refresh_workspace_text_metrics)
-        canvas_layout.addWidget(self.live_transcript_view, stretch=4)
+        layout.addWidget(self.live_transcript_view, stretch=4)
 
         footer_row = QHBoxLayout()
         footer_row.setSpacing(8)
@@ -622,7 +617,7 @@ class MainWindow(QMainWindow):
         footer_row.addStretch(1)
         footer_row.addWidget(self.workspace_counter_label)
         footer_row.addWidget(self.workspace_wave_hint)
-        canvas_layout.addLayout(footer_row)
+        layout.addLayout(footer_row)
 
         waveform_frame = QFrame()
         waveform_frame.setObjectName("WaveformCard")
@@ -631,9 +626,8 @@ class MainWindow(QMainWindow):
         waveform_layout.setSpacing(0)
         self.waveform_widget = WaveformWidget()
         waveform_layout.addWidget(self.waveform_widget)
-        canvas_layout.addWidget(waveform_frame, stretch=2)
+        layout.addWidget(waveform_frame, stretch=2)
 
-        layout.addWidget(workspace_canvas, stretch=1)
         self._refresh_workspace_text_metrics()
         return card
 

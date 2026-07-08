@@ -126,9 +126,9 @@ def _build_parser():
     )
     download.add_argument(
         "--source",
-        choices=("huggingface", "modelscope", "auto"),
-        default="auto",
-        help="Model download source (default: auto-detect based on network)",
+        choices=("modelscope",),
+        default="modelscope",
+        help="Model download source (fixed: modelscope)",
     )
     download.add_argument(
         "--model-dir",
@@ -320,15 +320,11 @@ def _run_download(args):
 
 
 def _download_model_resources(source, model_dir):
-    if source == "auto":
-        from indextts.utils.model_download import snapshot_download
-        snapshot_download(MODEL_REPO_ID, local_dir=str(model_dir))
-    elif source == "modelscope":
+    if source == "modelscope":
         from indextts.utils.model_download import _snapshot_from_modelscope
         _snapshot_from_modelscope(MODEL_REPO_ID, str(model_dir))
     else:
-        from huggingface_hub import snapshot_download
-        snapshot_download(repo_id=MODEL_REPO_ID, local_dir=str(model_dir))
+        raise ValueError(f"Unsupported download source: {source}")
 
     if _missing_primary_model_resources(model_dir):
         return
@@ -339,10 +335,6 @@ def _download_model_resources(source, model_dir):
 
 
 def _download_support_package(source):
-    if source == "auto":
-        return "huggingface_hub modelscope"
-    if source == "huggingface":
-        return "huggingface_hub"
     return "modelscope"
 
 

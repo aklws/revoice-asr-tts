@@ -1,6 +1,5 @@
 """
-Model download utility that automatically switches between HuggingFace Hub and
-ModelScope based on the detected network environment.
+Model download utility that always uses ModelScope.
 
 All auxiliary models are downloaded to ``{model_dir}/hf_cache/`` at startup
 via ``ensure_models_available()``, so no downloads happen during inference.
@@ -14,25 +13,13 @@ from typing import Callable
 
 from loguru import logger
 
-from indextts.utils.network_detection import need_proxy
-
-_USING_MODELSCOPE: bool | None = None  # lazily computed on first use
-
-
-def _should_use_modelscope() -> bool:
-    global _USING_MODELSCOPE
-    if _USING_MODELSCOPE is None:
-        _USING_MODELSCOPE = need_proxy()
-    return _USING_MODELSCOPE
-
 # Mapping from HuggingFace repo_id to ModelScope model_id.
 HF_TO_MODELSCOPE_REPO_MAP = {
-    "funasr/campplus": "iic/speech_campplus_sv_zh-cn_16k-common",
     "facebook/w2v-bert-2.0": "AI-ModelScope/w2v-bert-2.0",
 }
 
-# Default BigVGAN repo (also in config.yaml, but needed for pre-download)
-_BIGVGAN_REPO = "nvidia/bigvgan_v2_22khz_80band_256x"
+# Default BigVGAN repo on ModelScope (also in config.yaml, but needed for pre-download)
+_BIGVGAN_REPO = "nv-community/bigvgan_v2_22khz_80band_256x"
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, object]], None]
 
@@ -69,71 +56,24 @@ def _load_modelscope_snapshot_download():
     return module.snapshot_download
 
 
-@cache
-def _load_hf_hub_download():
-    module = importlib.import_module("huggingface_hub")
-    return module.hf_hub_download
-
-
-@cache
-def _load_hf_snapshot_download():
-    module = importlib.import_module("huggingface_hub")
-    return module.snapshot_download
-
-
-@cache
-def _load_examples_downloader():
-    module = importlib.import_module("indextts.utils.examples_downloader")
-    return module._download_file
-
-
 def _download_single_file(repo_id: str, filename: str, local_path: str) -> str:
-    """Download a single file from a HF/ModelScope repo to a specific local path."""
+    """Download a single file from a ModelScope repo to a specific local path."""
     local_dir = os.path.dirname(local_path)
     os.makedirs(local_dir, exist_ok=True)
-
-    if _should_use_modelscope():
-        ms_model_id = HF_TO_MODELSCOPE_REPO_MAP.get(repo_id, repo_id)
-        # Try ModelScope SDK first
-        try:
-            snapshot_download = _load_modelscope_snapshot_download()
-            downloaded_path = snapshot_download(
-                model_id=ms_model_id, allow_patterns=filename, local_dir=local_dir,
-            )
-            if not downloaded_path or not os.path.isfile(downloaded_path):
-                downloaded_path = os.path.join(local_dir, filename)
-            if os.path.abspath(downloaded_path) != os.path.abspath(local_path):
-                shutil.copy2(downloaded_path, local_path)
-            if not os.path.isfile(local_path):
-                raise RuntimeError(f"Downloaded file not found at expected path: {local_path}")
-            return local_path
-        except Exception as e:
-            logger.warning(
-                "通过 ModelScope 下载 {}/{} 失败: {}。将回退到 hf-mirror。",
-                ms_model_id,
-                filename,
-                e,
-                exc_info=True,
-            )
-        # Fallback to hf-mirror.com (only path that needs manual download)
-        _download_file = _load_examples_downloader()
-        url = f"https://hf-mirror.com/{repo_id}/resolve/main/{filename}"
-        logger.info("正在通过 hf-mirror 下载 {}/{} -> {}", repo_id, filename, local_path)
-        _download_file(url, local_path, timeout=300)
-    else:
-        # Use HuggingFace Hub SDK
-        hf_hub_download = _load_hf_hub_download()
-        logger.info("正在下载 {}/{} -> {}", repo_id, filename, local_path)
-        downloaded_path = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=local_dir)
-        if downloaded_path and os.path.abspath(downloaded_path) != os.path.abspath(local_path):
-            shutil.copy2(downloaded_path, local_path)
-        elif not os.path.isfile(local_path):
-            fallback_path = os.path.join(local_dir, filename)
-            if os.path.isfile(fallback_path):
-                shutil.copy2(fallback_path, local_path)
-        if not os.path.isfile(local_path):
-            raise RuntimeError(f"Downloaded file not found at expected path: {local_path}")
-
+    ms_model_id = HF_TO_MODELSCOPE_REPO_MAP.get(repo_id, repo_id)
+    snapshot_download = _load_modelscope_snapshot_download()
+    logger.info("正在通过 ModelScope 下载 {}/{} -> {}", ms_model_id, filename, local_path)
+    downloaded_path = snapshot_download(
+        model_id=ms_model_id,
+        allow_patterns=filename,
+        local_dir=local_dir,
+    )
+    if not downloaded_path or not os.path.isfile(downloaded_path):
+        downloaded_path = os.path.join(local_dir, filename)
+    if os.path.abspath(downloaded_path) != os.path.abspath(local_path):
+        shutil.copy2(downloaded_path, local_path)
+    if not os.path.isfile(local_path):
+        raise RuntimeError(f"Downloaded file not found at expected path: {local_path}")
     return local_path
 
 
@@ -259,7 +199,7 @@ def ensure_models_available(
         ),
         (
             "campplus",
-            "funasr/campplus",
+            "iic/speech_campplus_sv_zh-cn_16k-common",
             "campplus_cn_common.bin",
             os.path.join(cache_dir, "campplus_cn_common.bin"),
             "CAMPPlus",
@@ -334,16 +274,9 @@ def ensure_models_available(
 
 
 def snapshot_download(repo_id: str, local_dir: str, revision=None, force_download=False, **kwargs) -> str:
-    """Download an entire model repository (HuggingFace or ModelScope)."""
-    if _should_use_modelscope():
-        return _snapshot_from_modelscope(repo_id, local_dir, revision)
-    else:
-        _hf_snapshot = _load_hf_snapshot_download()
-        logger.info("正在从 HuggingFace 下载仓库: {}", repo_id)
-        return _hf_snapshot(
-            repo_id=repo_id, local_dir=local_dir, revision=revision,
-            force_download=force_download, **kwargs,
-        )
+    """Download an entire model repository from ModelScope."""
+    _ = force_download, kwargs
+    return _snapshot_from_modelscope(repo_id, local_dir, revision)
 
 
 def _snapshot_from_modelscope(model_id: str, local_dir: str, revision=None) -> str:

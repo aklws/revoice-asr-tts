@@ -46,9 +46,9 @@ def prompt_wav():
 # Each auxiliary model: (test_id, repo_id, probe_file)
 # probe_file: a small file in the repo to verify download works end-to-end.
 _MODEL_PROBES = [
-    ("bigvgan", "nvidia/bigvgan_v2_22khz_80band_256x", "config.json"),
+    ("bigvgan", "nv-community/bigvgan_v2_22khz_80band_256x", "config.json"),
     ("w2v-bert-2.0", "facebook/w2v-bert-2.0", "config.json"),
-    ("campplus", "funasr/campplus", "campplus_cn_common.bin"),
+    ("campplus", "iic/speech_campplus_sv_zh-cn_16k-common", "campplus_cn_common.bin"),
     ("MaskGCT", "amphion/MaskGCT", "README.md"),
 ]
 
@@ -56,14 +56,11 @@ _MODEL_PROBES = [
 @pytest.mark.parametrize("name,repo_id,filename", _MODEL_PROBES, ids=[m[0] for m in _MODEL_PROBES])
 def test_model_download_reachable(name, repo_id, filename, tmp_path):
     """Each auxiliary model must be downloadable via the real download path."""
-    from indextts.utils.examples_downloader import _download_file
-    from indextts.utils.network_detection import need_proxy
+    from indextts.utils.model_download import _download_single_file
 
-    base_url = "https://hf-mirror.com" if need_proxy() else "https://huggingface.co"
-    url = f"{base_url}/{repo_id}/resolve/main/{filename}"
     dest = tmp_path / filename
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _download_file(url, str(dest), max_bytes=8192)
+    _download_single_file(repo_id, filename, str(dest))
     assert dest.exists() and dest.stat().st_size > 0
 
 

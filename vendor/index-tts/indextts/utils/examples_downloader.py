@@ -1,9 +1,7 @@
 """
-Example file downloader that fetches example audio files from HuggingFace
-Spaces or ModelScope Studio, depending on the detected network environment.
+Example file downloader that fetches example audio files from ModelScope Studio.
 
 The example files are hosted at:
-- HuggingFace: https://huggingface.co/spaces/IndexTeam/IndexTTS-2-Demo
 - ModelScope: https://modelscope.cn/studio/IndexTeam/IndexTTS-2-Demo
 
 File names are determined from ``examples/cases.jsonl``.
@@ -16,8 +14,6 @@ from typing import List, Set
 
 import requests
 
-from indextts.utils.network_detection import need_proxy
-
 logger = logging.getLogger(__name__)
 
 # Project root (indextts/utils/../../ = project root)
@@ -25,8 +21,6 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 _EXAMPLES_DIR = os.path.join(_PROJECT_ROOT, "examples")
 _TESTS_DIR = os.path.join(_PROJECT_ROOT, "tests")
 
-# Remote repository configuration
-_HF_RAW_URL = "https://huggingface.co/spaces/IndexTeam/IndexTTS-2-Demo/resolve/main"
 _MS_RAW_URL = "https://modelscope.cn/studio/IndexTeam/IndexTTS-2-Demo/resolve/master"
 # Additional files not listed in cases.jsonl but needed by the code
 _EXTRA_FILES = [
@@ -124,7 +118,7 @@ def ensure_examples_available(force: bool = False) -> None:
         return
 
     os.makedirs(_EXAMPLES_DIR, exist_ok=True)
-    base_url = _MS_RAW_URL if need_proxy() else _HF_RAW_URL
+    base_url = _MS_RAW_URL
 
     for filename in required:
         local_path = os.path.join(_EXAMPLES_DIR, filename)
@@ -150,8 +144,7 @@ def download_test_sample(force: bool = False) -> str:
     if os.path.exists(local_path) and not force:
         return local_path
 
-    base_url = _MS_RAW_URL if need_proxy() else _HF_RAW_URL
-    url = f"{base_url}/examples/voice_01.wav"
+    url = f"{_MS_RAW_URL}/examples/voice_01.wav"
 
     _download_file(url, local_path, min_size=100, timeout=120)
     return local_path

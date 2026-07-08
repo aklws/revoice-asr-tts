@@ -89,7 +89,7 @@ class DownloadCommandTests(unittest.TestCase):
             exit_code = main(args)
         return exit_code, stdout.getvalue(), stderr.getvalue()
 
-    def test_download_defaults_to_huggingface_source_and_checks_downloaded_resources(self):
+    def test_download_defaults_to_modelscope_source_and_checks_downloaded_resources(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state = user_state_paths(Path(temp_dir).resolve())
             calls = []
@@ -105,7 +105,10 @@ class DownloadCommandTests(unittest.TestCase):
                 make_aux_model_cache(Path(model_dir))
 
             with mock.patch.dict(os.environ, state["env"], clear=False):
-                with mock.patch("indextts.utils.model_download.snapshot_download", side_effect=fake_snapshot_download):
+                with mock.patch(
+                    "indextts.utils.model_download._snapshot_from_modelscope",
+                    side_effect=fake_snapshot_download,
+                ):
                     with mock.patch(
                         "indextts.utils.model_download.ensure_models_available",
                         side_effect=fake_ensure_models_available,
@@ -145,7 +148,7 @@ class DownloadCommandTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertIn(f'model_dir = "{model_dir.as_posix()}"', config_text)
 
-    def test_download_from_huggingface_preserves_existing_files_in_model_dir(self):
+    def test_download_from_modelscope_preserves_existing_files_in_model_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir).resolve()
             state = user_state_paths(temp_path)
@@ -155,15 +158,18 @@ class DownloadCommandTests(unittest.TestCase):
             model_dir.mkdir()
             sentinel.write_text("keep", encoding="utf-8")
 
-            def fake_snapshot_download(*, repo_id, local_dir):
+            def fake_snapshot_download(repo_id, local_dir, **kwargs):
                 target = Path(local_dir)
                 calls.append((repo_id, target, sentinel.exists()))
                 make_model_dir(target)
 
             with mock.patch.dict(os.environ, state["env"], clear=False):
-                with mock.patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot_download):
+                with mock.patch(
+                    "indextts.utils.model_download._snapshot_from_modelscope",
+                    side_effect=fake_snapshot_download,
+                ):
                     exit_code, stdout, stderr = self.run_cli(
-                        ["download", "--source", "huggingface", "--model-dir", str(model_dir)]
+                        ["download", "--source", "modelscope", "--model-dir", str(model_dir)]
                     )
                 sentinel_text = sentinel.read_text(encoding="utf-8")
 
@@ -200,17 +206,17 @@ class DownloadCommandTests(unittest.TestCase):
             state = user_state_paths(Path(temp_dir).resolve())
 
             def raise_import(*args, **kwargs):
-                raise ImportError("No module named huggingface_hub")
+                raise ImportError("No module named modelscope")
 
             with mock.patch.dict(os.environ, state["env"], clear=False):
-                with mock.patch("indextts.utils.model_download.snapshot_download", side_effect=raise_import):
+                with mock.patch("indextts.utils.model_download._snapshot_from_modelscope", side_effect=raise_import):
                     exit_code, stdout, stderr = self.run_cli(["download"])
                 config_exists = state["config_path"].exists()
 
         self.assertEqual(exit_code, 3)
         self.assertEqual(stdout, "")
-        self.assertIn("ERROR: runtime unavailable for auto download source", stderr)
-        self.assertIn("pip install huggingface_hub modelscope", stderr)
+        self.assertIn("ERROR: runtime unavailable for modelscope download source", stderr)
+        self.assertIn("pip install modelscope", stderr)
         self.assertFalse(config_exists)
 
     def test_download_from_modelscope_returns_runtime_unavailable_when_source_package_is_missing(self):

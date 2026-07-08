@@ -343,7 +343,7 @@ def _configure_application(app: QApplication) -> None:
         logger.warning("应用图标不存在: {}", APP_ICON_PATH)
     app.setStyle("Fusion")
     app.setStyleSheet(get_theme_stylesheet(DEFAULT_THEME))
-    app.setFont(QFont("Microsoft YaHei UI", 10))
+    app.setFont(QFont("Microsoft YaHei UI", 9))
 
 
 def _run_startup_model_check(app: QApplication) -> str | None:
