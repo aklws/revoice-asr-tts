@@ -1,0 +1,92 @@
+[project]
+name = "indextts"
+version = "2.0.0"
+description = "IndexTTS2: A Breakthrough in Emotionally Expressive and Duration-Controlled Auto-Regressive Zero-Shot Text-to-Speech"
+authors = [{ name = "Bilibili IndexTTS Team" }]
+license = "LicenseRef-Bilibili-IndexTTS"
+license-files = ["LICEN[CS]E*", "INDEX_MODEL_LICENSE*"]
+readme = "README.md"
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+
+  "Natural Language :: English",
+  "Natural Language :: Chinese (Simplified)",
+
+  "Programming Language :: Python :: 3",
+
+  "Operating System :: OS Independent",
+]
+requires-python = ">=3.10"
+# This vendored package is consumed inside the repo as a local source dependency.
+# Runtime dependencies are managed by the root project to avoid resolver conflicts
+# with the application's pinned CUDA/PyTorch stack.
+dependencies = []
+
+[project.optional-dependencies]
+# To install the WebUI support, use `uv sync --extra webui` (or `--all-extras`).
+webui = [
+  "gradio==5.45.0",
+]
+# To install the DeepSpeed support, use `uv sync --extra deepspeed` (or `--all-extras`).
+deepspeed = [
+  "deepspeed==0.17.1",
+]
+test = [
+  "pytest>=7.0",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: tests that require GPU and model checkpoints (deselect with '-m not gpu')",
+]
+
+[project.urls]
+Homepage = "https://github.com/index-tts/index-tts"
+Repository = "https://github.com/index-tts/index-tts.git"
+
+[project.scripts]
+# Set the installed binary names and entry points.
+indextts = "indextts.cli:main"
+indextts2 = "indextts.cli_v2:main"
+
+[build-system]
+# How to build the project as a CLI tool or PyPI package.
+# NOTE: Use `uv tool install -e .` to install the package as a CLI tool.
+requires = ["hatchling >= 1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# Disable build isolation when building DeepSpeed from source.
+# NOTE: This is *necessary* so that DeepSpeed builds directly within our `.venv`,
+# and finds our CUDA-enabled version of PyTorch, which DeepSpeed *needs* during
+# its compilation to determine what GPU support to compile for itself. It also
+# saves time, since it won't waste time downloading a generic PyTorch version.
+no-build-isolation-package = ["deepspeed"]
+
+[tool.uv.sources]
+# Install PyTorch with CUDA support on Linux/Windows (CUDA doesn't exist for Mac).
+# NOTE: We must explicitly request them as `dependencies` above. These improved
+# versions will not be selected if they're only third-party dependencies.
+torch = [
+  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+# Use PyTorch built for NVIDIA Toolkit version 12.8.
+# Available versions: https://pytorch.org/get-started/locally/
+url = "https://download.pytorch.org/whl/cu128"
+# Only use this index when explicitly requested by `tool.uv.sources`.
+explicit = true

@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.tox/
+
+# IDE / editor
+.idea/
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime and debug artifacts
+logs/
+outputs/
+.dbg/
+*.log
+*.tmp
+*.bak
+
+# Local models and media assets
+checkpoints/
+asset/
+scripts/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Private or local-only docs/scripts not intended for GitHub
+docs/
+packaging/
+
+# App-specific local runtime binaries
+bin/
