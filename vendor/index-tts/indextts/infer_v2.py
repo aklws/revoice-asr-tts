@@ -1,6 +1,7 @@
 import os
 import string
 from subprocess import CalledProcessError
+from collections import OrderedDict
 
 import json
 import re
@@ -120,23 +121,15 @@ class IndexTTS2:
                 logger.debug("{!r}", e)
                 self.use_cuda_kernel = False
 
-        # Load w2v-bert-2.0 from pre-downloaded local dir
-        w2v_bert_dir = aux_paths["w2v_bert"]
-        self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained(w2v_bert_dir, local_files_only=True)
-        self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
-            os.path.join(self.model_dir, self.cfg.w2v_stat),
-            model_path=w2v_bert_dir)
-        self.semantic_model = self.semantic_model.to(self.device)
-        self.semantic_model.eval()
-        self.semantic_mean = self.semantic_mean.to(self.device)
-        self.semantic_std = self.semantic_std.to(self.device)
-
-        semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
-        semantic_code_ckpt = aux_paths["semantic_codec"]
-        safetensors.torch.load_model(semantic_codec, semantic_code_ckpt)
-        self.semantic_codec = semantic_codec.to(self.device)
-        self.semantic_codec.eval()
-        logger.info("semantic_codec 权重已从以下路径恢复: {}", semantic_code_ckpt)
+        # 语义前端改为按需加载：首次真正执行 infer 时再初始化
+        self._w2v_bert_dir = aux_paths["w2v_bert"]
+        self._semantic_code_ckpt = aux_paths["semantic_codec"]
+        self.extract_features = None
+        self.semantic_model = None
+        self.semantic_mean = None
+        self.semantic_std = None
+        self.semantic_codec = None
+        logger.info("语义前端已设置为按需加载，将在首次合成时初始化")
 
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
@@ -160,13 +153,9 @@ class IndexTTS2:
         self.s2mel.eval()
         logger.info("s2mel 权重已从以下路径恢复: {}", s2mel_path)
 
-        # load campplus_model
-        campplus_ckpt_path = aux_paths["campplus"]
-        campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
-        campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
-        self.campplus_model = campplus_model.to(self.device)
-        self.campplus_model.eval()
-        logger.info("campplus_model 权重已从以下路径恢复: {}", campplus_ckpt_path)
+        self._campplus_ckpt_path = aux_paths["campplus"]
+        self.campplus_model = None
+        logger.info("campplus_model 已设置为按需加载: {}", self._campplus_ckpt_path)
 
         # load BigVGAN from pre-downloaded local dir
         bigvgan_dir = aux_paths["bigvgan"]
@@ -216,9 +205,15 @@ class IndexTTS2:
         self.cache_s2mel_style = None
         self.cache_s2mel_prompt = None
         self.cache_spk_audio_prompt = None
+        self.cache_spk_audio_key = None
         self.cache_emo_cond = None
         self.cache_emo_audio_prompt = None
+        self.cache_emo_audio_key = None
         self.cache_mel = None
+        self._speaker_feature_cache = OrderedDict()
+        self._emotion_feature_cache = OrderedDict()
+        self._max_reference_cache_entries = 4
+        self._max_emotion_cache_entries = 4
 
         # 进度引用显示（可选）
         self.gr_progress = None
@@ -226,6 +221,7 @@ class IndexTTS2:
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
+        self._ensure_semantic_frontend_loaded()
         vq_emb = self.semantic_model(
             input_features=input_features,
             attention_mask=attention_mask,
@@ -234,6 +230,63 @@ class IndexTTS2:
         feat = vq_emb.hidden_states[17]  # (B, T, C)
         feat = (feat - self.semantic_mean) / self.semantic_std
         return feat
+
+    def _build_audio_cache_key(self, audio_path):
+        resolved = os.path.abspath(os.path.expanduser(audio_path))
+        try:
+            stat = os.stat(resolved)
+            return (resolved, int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return (resolved, None, None)
+
+    def _cache_tensor_cpu(self, tensor):
+        return tensor.detach().cpu()
+
+    def _restore_tensor_to_device(self, tensor):
+        return tensor.to(self.device)
+
+    def _remember_cache_entry(self, cache_store, key, value, max_entries):
+        cache_store[key] = value
+        cache_store.move_to_end(key)
+        while len(cache_store) > max_entries:
+            cache_store.popitem(last=False)
+
+    def _ensure_semantic_frontend_loaded(self):
+        if self.extract_features is not None and self.semantic_model is not None and self.semantic_codec is not None:
+            return
+        logger.info("正在按需加载语义前端...")
+        self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained(
+            self._w2v_bert_dir,
+            local_files_only=True,
+        )
+        self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
+            os.path.join(self.model_dir, self.cfg.w2v_stat),
+            model_path=self._w2v_bert_dir,
+        )
+        self.semantic_model = self.semantic_model.to(self.device)
+        self.semantic_model.eval()
+        self.semantic_mean = self.semantic_mean.to(self.device)
+        self.semantic_std = self.semantic_std.to(self.device)
+
+        semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
+        safetensors.torch.load_model(semantic_codec, self._semantic_code_ckpt)
+        self.semantic_codec = semantic_codec.to(self.device)
+        self.semantic_codec.eval()
+        logger.info("语义前端加载完成")
+
+    def _get_campplus_model(self):
+        if self.campplus_model is None:
+            campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
+            campplus_model.load_state_dict(torch.load(self._campplus_ckpt_path, map_location="cpu"))
+            self.campplus_model = campplus_model.eval()
+            logger.info("campplus_model 已按需加载到 CPU: {}", self._campplus_ckpt_path)
+        return self.campplus_model
+
+    def _compute_campplus_style(self, feature_batch):
+        campplus_model = self._get_campplus_model()
+        feature_batch = feature_batch.detach().to("cpu", dtype=torch.float32)
+        with torch.no_grad():
+            return campplus_model(feature_batch)
 
     def remove_long_silence(self, codes: torch.Tensor, silent_token=52, max_consecutive=30):
         """
@@ -443,6 +496,7 @@ class IndexTTS2:
                 emo_text,
             )
         start_time = time.perf_counter()
+        self._ensure_semantic_frontend_loaded()
 
         if use_emo_text or emo_vector is not None:
             # we're using a text or emotion vector guidance; so we must remove
@@ -477,45 +531,74 @@ class IndexTTS2:
             # must always use alpha=1.0 when we don't have an external reference voice
             emo_alpha = 1.0
 
-        # 如果参考音频改变了，才需要重新生成, 提升速度
-        if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
-            if self.cache_spk_cond is not None:
-                self.cache_spk_cond = None
-                self.cache_s2mel_style = None
-                self.cache_s2mel_prompt = None
-                self.cache_mel = None
-                torch.cuda.empty_cache()
-            audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
-            audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
-            audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
+        # 参考音频做多条目真缓存：当前设备热缓存 + CPU 持久缓存
+        spk_audio_key = self._build_audio_cache_key(spk_audio_prompt)
+        if self.cache_spk_cond is None or self.cache_spk_audio_key != spk_audio_key:
+            cached_speaker = self._speaker_feature_cache.get(spk_audio_key)
+            if cached_speaker is not None:
+                self._speaker_feature_cache.move_to_end(spk_audio_key)
+                spk_cond_emb = self._restore_tensor_to_device(cached_speaker["spk_cond_emb"])
+                style = self._restore_tensor_to_device(cached_speaker["style"])
+                prompt_condition = self._restore_tensor_to_device(cached_speaker["prompt_condition"])
+                ref_mel = self._restore_tensor_to_device(cached_speaker["ref_mel"])
+                self.cache_spk_cond = spk_cond_emb
+                self.cache_s2mel_style = style
+                self.cache_s2mel_prompt = prompt_condition
+                self.cache_spk_audio_prompt = spk_audio_prompt
+                self.cache_spk_audio_key = spk_audio_key
+                self.cache_mel = ref_mel
+                logger.info("命中参考音频缓存: {}", spk_audio_prompt)
+            else:
+                if self.cache_spk_cond is not None:
+                    self.cache_spk_cond = None
+                    self.cache_s2mel_style = None
+                    self.cache_s2mel_prompt = None
+                    self.cache_mel = None
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
+                audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
+                audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
-            inputs = self.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
-            input_features = inputs["input_features"]
-            attention_mask = inputs["attention_mask"]
-            input_features = input_features.to(self.device)
-            attention_mask = attention_mask.to(self.device)
-            spk_cond_emb = self.get_emb(input_features, attention_mask)
+                inputs = self.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
+                input_features = inputs["input_features"]
+                attention_mask = inputs["attention_mask"]
+                input_features = input_features.to(self.device)
+                attention_mask = attention_mask.to(self.device)
+                spk_cond_emb = self.get_emb(input_features, attention_mask)
 
-            _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
-            ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
-            ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
-            feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(ref_mel.device),
-                                                     num_mel_bins=80,
-                                                     dither=0,
-                                                     sample_frequency=16000)
-            feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
-            style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
+                _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
+                ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
+                ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
+                feat = torchaudio.compliance.kaldi.fbank(audio_16k.float(),
+                                                         num_mel_bins=80,
+                                                         dither=0,
+                                                         sample_frequency=16000)
+                feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
+                style = self._compute_campplus_style(feat.unsqueeze(0)).to(self.device)  # 参考音频的全局style2[1,192]
 
-            prompt_condition = self.s2mel.models['length_regulator'](S_ref,
-                                                                     ylens=ref_target_lengths,
-                                                                     n_quantizers=3,
-                                                                     f0=None)[0]
+                prompt_condition = self.s2mel.models['length_regulator'](S_ref,
+                                                                         ylens=ref_target_lengths,
+                                                                         n_quantizers=3,
+                                                                         f0=None)[0]
 
-            self.cache_spk_cond = spk_cond_emb
-            self.cache_s2mel_style = style
-            self.cache_s2mel_prompt = prompt_condition
-            self.cache_spk_audio_prompt = spk_audio_prompt
-            self.cache_mel = ref_mel
+                self.cache_spk_cond = spk_cond_emb
+                self.cache_s2mel_style = style
+                self.cache_s2mel_prompt = prompt_condition
+                self.cache_spk_audio_prompt = spk_audio_prompt
+                self.cache_spk_audio_key = spk_audio_key
+                self.cache_mel = ref_mel
+                self._remember_cache_entry(
+                    self._speaker_feature_cache,
+                    spk_audio_key,
+                    {
+                        "spk_cond_emb": self._cache_tensor_cpu(spk_cond_emb),
+                        "style": self._cache_tensor_cpu(style),
+                        "prompt_condition": self._cache_tensor_cpu(prompt_condition),
+                        "ref_mel": self._cache_tensor_cpu(ref_mel),
+                    },
+                    self._max_reference_cache_entries,
+                )
         else:
             style = self.cache_s2mel_style
             prompt_condition = self.cache_s2mel_prompt
@@ -535,20 +618,38 @@ class IndexTTS2:
             emovec_mat = torch.sum(emovec_mat, 0)
             emovec_mat = emovec_mat.unsqueeze(0)
 
-        if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
-            if self.cache_emo_cond is not None:
-                self.cache_emo_cond = None
-                torch.cuda.empty_cache()
-            emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
-            emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
-            emo_input_features = emo_inputs["input_features"]
-            emo_attention_mask = emo_inputs["attention_mask"]
-            emo_input_features = emo_input_features.to(self.device)
-            emo_attention_mask = emo_attention_mask.to(self.device)
-            emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
+        emo_audio_key = self._build_audio_cache_key(emo_audio_prompt)
+        if self.cache_emo_cond is None or self.cache_emo_audio_key != emo_audio_key:
+            cached_emotion = self._emotion_feature_cache.get(emo_audio_key)
+            if cached_emotion is not None:
+                self._emotion_feature_cache.move_to_end(emo_audio_key)
+                emo_cond_emb = self._restore_tensor_to_device(cached_emotion["emo_cond_emb"])
+                self.cache_emo_cond = emo_cond_emb
+                self.cache_emo_audio_prompt = emo_audio_prompt
+                self.cache_emo_audio_key = emo_audio_key
+                logger.info("命中情感参考缓存: {}", emo_audio_prompt)
+            else:
+                if self.cache_emo_cond is not None:
+                    self.cache_emo_cond = None
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
+                emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
+                emo_input_features = emo_inputs["input_features"]
+                emo_attention_mask = emo_inputs["attention_mask"]
+                emo_input_features = emo_input_features.to(self.device)
+                emo_attention_mask = emo_attention_mask.to(self.device)
+                emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
 
-            self.cache_emo_cond = emo_cond_emb
-            self.cache_emo_audio_prompt = emo_audio_prompt
+                self.cache_emo_cond = emo_cond_emb
+                self.cache_emo_audio_prompt = emo_audio_prompt
+                self.cache_emo_audio_key = emo_audio_key
+                self._remember_cache_entry(
+                    self._emotion_feature_cache,
+                    emo_audio_key,
+                    {"emo_cond_emb": self._cache_tensor_cpu(emo_cond_emb)},
+                    self._max_emotion_cache_entries,
+                )
         else:
             emo_cond_emb = self.cache_emo_cond
 
@@ -790,12 +891,14 @@ def find_most_similar_cosine(query_vector, matrix):
 class QwenEmotion:
     def __init__(self, model_dir):
         self.model_dir = model_dir
+        self.device = "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
-            torch_dtype="float16",  # "auto"
-            device_map="auto"
+            torch_dtype=torch.float32,
         )
+        self.model = self.model.to(self.device)
+        self.model.eval()
         self.prompt = "文本情感分类"
         self.cn_key_to_en = {
             "高兴": "happy",
@@ -858,7 +961,7 @@ class QwenEmotion:
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
 
         # conduct text completion
         generated_ids = self.model.generate(

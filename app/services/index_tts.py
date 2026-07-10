@@ -211,11 +211,12 @@ class IndexTTSService:
             if not config_path.exists():
                 raise FileNotFoundError(f"IndexTTS-2 config not found: {config_path}")
 
-            use_accel, compiler_desc = _configure_c_compiler()
-            if use_accel:
-                logger.info("检测到 C 编译器，启用 IndexTTS Triton 加速: {}", compiler_desc)
+            accel_available, compiler_desc = _configure_c_compiler()
+            use_accel = False
+            if accel_available:
+                logger.info("检测到 C 编译器 ({}), 但已主动关闭 IndexTTS Accel GPT 以降低显存占用。", compiler_desc)
             else:
-                logger.warning("未检测到可用 C 编译器或 MSVC 环境，已自动禁用 IndexTTS Triton 加速。")
+                logger.info("未检测到可用 C 编译器或 MSVC 环境，IndexTTS Accel GPT 保持关闭。")
 
             logger.info("正在加载 IndexTTS-2 模型 (设备={})", self.device)
             index_tts_cls = _load_indextts2_class()
@@ -307,7 +308,10 @@ class IndexTTSService:
                 feature_batch[index, :frame_count, :] = feat
 
             with torch.no_grad():
-                style = self._tts.campplus_model(feature_batch.to(self._tts.device))
+                if hasattr(self._tts, "_compute_campplus_style"):
+                    style = self._tts._compute_campplus_style(feature_batch)
+                else:
+                    style = self._tts.campplus_model(feature_batch.to(self._tts.device))
                 return style.cpu().numpy().astype(np.float32, copy=False)
             
     def extract_voiceprint(self, audio_np: np.ndarray, sample_rate: int) -> list[float]:
