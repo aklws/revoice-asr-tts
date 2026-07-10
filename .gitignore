@@ -45,11 +45,9 @@ dist/
 *.spec
 
 # Private or local-only docs/scripts not intended for GitHub
-docs/*
-!docs/release-v0.0.2.md
-!docs/release-v0.0.3.md
+docs/
 packaging/
-vendor/**/docs/
+uv.lock
 
 # App-specific local runtime binaries
 bin/
