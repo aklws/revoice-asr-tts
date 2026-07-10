@@ -45,7 +45,7 @@ from ui.workers import LiveSpeechWorker
 
 
 logger = get_logger(__name__)
-APP_VERSION = "v0.0.2"
+APP_VERSION = "v0.0.3"
 APP_DISPLAY_NAME = f"Revoice ASR-TTS {APP_VERSION}"
 SETTINGS_ICON_PATH = get_bundle_file("ui", "assets", "settings_gear.svg")
 EMOTION_PRESETS: tuple[tuple[str, str | None], ...] = (
@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
     live_stop_requested = Signal()
     live_shutdown_requested = Signal()
     live_asr_unload_requested = Signal()
+    live_emotion_unload_requested = Signal()
     live_asr_reload_requested = Signal()
 
     def __init__(self) -> None:
@@ -564,11 +565,6 @@ class MainWindow(QMainWindow):
         self.reference_meta_label.setWordWrap(True)
         layout.addWidget(self.reference_meta_label)
 
-        self.reference_engine_label = QLabel()
-        self.reference_engine_label.setObjectName("SummaryValue")
-        self.reference_engine_label.setWordWrap(True)
-        layout.addWidget(self.reference_engine_label)
-
         layout.addWidget(self.live_status_label)
         layout.addWidget(self.live_start_button)
         return card
@@ -646,6 +642,7 @@ class MainWindow(QMainWindow):
         input_mode_combo = QComboBox(dialog)
         for label, value in INPUT_MODES:
             input_mode_combo.addItem(label, value)
+        input_mode_combo.currentIndexChanged.connect(self._sync_quick_settings_auto_emotion_controls)
         form.addRow("输入方式", input_mode_combo)
 
         experimental_widget = QWidget(dialog)
@@ -695,13 +692,17 @@ class MainWindow(QMainWindow):
             self._quick_settings_auto_emotion_checkbox.setChecked(self._auto_emotion_feature_enabled)
         if self._quick_settings_auto_emotion_strength_slider is not None:
             self._quick_settings_auto_emotion_strength_slider.setValue(int(round(self._auto_emotion_strength / 0.05)))
+        self._sync_quick_settings_auto_emotion_controls()
 
         if dialog.exec() != QDialog.Accepted:
             return
 
         self.input_mode_combo.setCurrentIndex(self._quick_settings_input_mode_combo.currentIndex())
         if self._quick_settings_auto_emotion_checkbox is not None:
-            self._auto_emotion_feature_enabled = self._quick_settings_auto_emotion_checkbox.isChecked()
+            selected_mode = str(self._quick_settings_input_mode_combo.currentData() or "microphone")
+            self._auto_emotion_feature_enabled = (
+                selected_mode == "microphone" and self._quick_settings_auto_emotion_checkbox.isChecked()
+            )
         if self._quick_settings_auto_emotion_strength_slider is not None:
             self._auto_emotion_strength = self._quick_settings_auto_emotion_strength_slider.value() * 0.05
         self._on_auto_emotion_toggled()
@@ -984,8 +985,35 @@ class MainWindow(QMainWindow):
         for idx, btn in enumerate(self.emotion_preset_buttons):
             btn.setChecked(idx == current_index)
 
+    def _disable_auto_emotion_for_text_mode(self) -> None:
+        if self._current_input_mode() != "text":
+            return
+        if self._auto_emotion_feature_enabled:
+            self._auto_emotion_feature_enabled = False
+        if self._quick_settings_auto_emotion_checkbox is not None:
+            self._quick_settings_auto_emotion_checkbox.setChecked(False)
+
+    def _sync_quick_settings_auto_emotion_controls(self) -> None:
+        if self._quick_settings_input_mode_combo is None:
+            return
+        is_text_mode = str(self._quick_settings_input_mode_combo.currentData() or "microphone") == "text"
+        if self._quick_settings_auto_emotion_checkbox is not None:
+            if is_text_mode:
+                self._quick_settings_auto_emotion_checkbox.setChecked(False)
+            self._quick_settings_auto_emotion_checkbox.setEnabled(not is_text_mode)
+            self._quick_settings_auto_emotion_checkbox.setToolTip(
+                "文本模式下不可启用情感识别。" if is_text_mode else ""
+            )
+        if self._quick_settings_auto_emotion_strength_slider is not None:
+            self._quick_settings_auto_emotion_strength_slider.setEnabled(not is_text_mode)
+        if self._quick_settings_auto_emotion_strength_label is not None:
+            self._quick_settings_auto_emotion_strength_label.setEnabled(not is_text_mode)
+
     def _on_input_mode_changed(self) -> None:
         is_text_mode = self._current_input_mode() == "text"
+        if is_text_mode:
+            self._disable_auto_emotion_for_text_mode()
+        self._sync_quick_settings_auto_emotion_controls()
         self.input_device_combo.setEnabled(not is_text_mode)
         self._refresh_devices_info()
         if hasattr(self, "live_transcript_view") and hasattr(self, "transcript_intro_label"):
@@ -1008,7 +1036,12 @@ class MainWindow(QMainWindow):
         if is_text_mode:
             if hasattr(self, "live_transcript_view"):
                 self.live_transcript_view.setFocus()
-            self.live_asr_unload_requested.emit()
+            self.live_emotion_unload_requested.emit()
+            if self._live_worker is not None and self._live_worker._busy:
+                self._set_live_status("正在停止麦克风任务...", "busy")
+                self._live_worker.stop_live()
+            else:
+                self.live_asr_unload_requested.emit()
         else:
             self.live_asr_reload_requested.emit()
         self._refresh_live_start_button()
@@ -1366,6 +1399,7 @@ class MainWindow(QMainWindow):
         self.live_stop_requested.connect(self._live_worker.stop_live)
         self.live_shutdown_requested.connect(self._live_worker.shutdown)
         self.live_asr_unload_requested.connect(self._live_worker.unload_asr)
+        self.live_emotion_unload_requested.connect(self._live_worker.unload_emotion)
         self.live_asr_reload_requested.connect(self._live_worker.reload_asr)
         self._live_worker.ready.connect(self._on_live_ready)
         self._live_worker.status.connect(self._on_worker_status)
@@ -1422,6 +1456,8 @@ class MainWindow(QMainWindow):
     def _on_live_finished(self, transcript: str) -> None:
         if self._current_input_mode() == "text":
             self._set_text_edit_if_changed(self.live_transcript_view, transcript)
+            self.live_asr_unload_requested.emit()
+            self.live_emotion_unload_requested.emit()
         self._set_live_status("变声完成", "ready")
         if self._current_input_mode() == "text":
             self._update_auto_emotion_ui("", "idle")
@@ -1458,10 +1494,15 @@ class MainWindow(QMainWindow):
 
     def _refresh_live_start_button(self) -> None:
         input_mode = self._current_input_mode()
-        if input_mode == "microphone" and self._live_worker is not None and self._live_worker._busy:
-            self._set_text_if_changed(self.live_start_button, "关闭麦克风")
-            self.live_start_button.setIcon(self._standard_icon(QStyle.SP_MediaStop))
-            self.live_start_button.setEnabled(True)
+        if self._live_worker is not None and self._live_worker._busy:
+            if input_mode == "microphone":
+                self._set_text_if_changed(self.live_start_button, "关闭麦克风")
+                self.live_start_button.setIcon(self._standard_icon(QStyle.SP_MediaStop))
+                self.live_start_button.setEnabled(True)
+            else:
+                self._set_text_if_changed(self.live_start_button, "处理中")
+                self.live_start_button.setIcon(self._standard_icon(QStyle.SP_BrowserReload))
+                self.live_start_button.setEnabled(False)
             return
         if not self._models_ready:
             self._set_text_if_changed(self.live_start_button, "准备中")
@@ -1492,8 +1533,6 @@ class MainWindow(QMainWindow):
                 f"当前参考：{reference_name} | 播放：{output_label} | 耳返："
                 f"{self.monitor_output_device_combo.currentText().strip() or '关闭耳返'}"
             )
-        if hasattr(self, "reference_engine_label"):
-            self._set_text_if_changed(self.reference_engine_label, f"{engine_name} | {runtime_text}")
         if hasattr(self, "reference_ready_badge"):
             if not reference_path:
                 badge_text = "待选择"

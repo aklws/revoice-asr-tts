@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import deque
 from queue import Empty, Queue
 
 import librosa
 import numpy as np
 import sounddevice as sd
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtMultimedia import QAudioDevice, QAudioFormat, QAudioSource, QMediaDevices
+from PySide6.QtMultimedia import QAudioDevice, QAudioFormat, QMediaDevices
 
 from app import ASRService, get_settings
 from app.core.audio import resample_waveform
@@ -30,6 +29,11 @@ MIC_SHORT_SEGMENT_SILENCE_SEC = 0.38
 MIC_SESSION_END_SILENCE_SEC = 0.9
 MIC_PREROLL_SEC = 0.5
 MIC_MIN_SEGMENT_SEC = 0.2
+MIC_ASR_TRIM_BLOCK_SEC = 0.03
+MIC_ASR_TRIM_PAD_SEC = 0.08
+MIC_MIN_VOICED_SEC = 0.16
+MIC_MIN_VOICED_RATIO = 0.22
+MIC_ASR_CONTEXT_MAX_CHARS = 80
 VOICEPRINT_WINDOW_SEC = 0.8
 VOICEPRINT_HOP_SEC = 0.24
 VOICEPRINT_PAD_SEC = 0.08
@@ -80,6 +84,63 @@ def canonicalize_asr_text(text: str) -> str:
         return ""
     translation_table = str.maketrans("", "", " \t\r\n,.;:!?，。；：！？、\"'“”‘’()（）[]【】{}<>《》-—")
     return text.strip().lower().translate(translation_table)
+
+
+def trim_waveform_for_asr(waveform: np.ndarray) -> tuple[np.ndarray | None, str]:
+    if waveform.size <= 0:
+        return None, "当前片段为空，已跳过。"
+
+    block_size = max(1, int(ASR_SAMPLE_RATE * MIC_ASR_TRIM_BLOCK_SEC))
+    pad_size = max(0, int(ASR_SAMPLE_RATE * MIC_ASR_TRIM_PAD_SEC))
+    energy_threshold = MIC_SILENCE_THRESHOLD
+
+    if waveform.shape[0] <= block_size:
+        rms = float(np.sqrt(np.mean(np.square(waveform)))) if waveform.size else 0.0
+        if rms < energy_threshold:
+            return None, "当前片段能量过低，已按静音跳过。"
+        return waveform.astype(np.float32, copy=False), ""
+
+    frame_ranges: list[tuple[int, int]] = []
+    voiced_flags: list[bool] = []
+    voiced_samples = 0
+    for frame_start in range(0, int(waveform.shape[0]), block_size):
+        frame_end = min(int(waveform.shape[0]), frame_start + block_size)
+        frame = waveform[frame_start:frame_end]
+        rms = float(np.sqrt(np.mean(np.square(frame)))) if frame.size else 0.0
+        is_voiced = rms >= energy_threshold
+        frame_ranges.append((frame_start, frame_end))
+        voiced_flags.append(is_voiced)
+        if is_voiced:
+            voiced_samples += frame_end - frame_start
+
+    try:
+        first_voiced = voiced_flags.index(True)
+        last_voiced = len(voiced_flags) - 1 - voiced_flags[::-1].index(True)
+    except ValueError:
+        return None, "当前片段未检测到有效语音，已跳过。"
+
+    trimmed_start = max(0, frame_ranges[first_voiced][0] - pad_size)
+    trimmed_end = min(int(waveform.shape[0]), frame_ranges[last_voiced][1] + pad_size)
+    if trimmed_end <= trimmed_start:
+        return None, "当前片段裁剪后无有效语音，已跳过。"
+
+    trimmed = waveform[trimmed_start:trimmed_end].astype(np.float32, copy=False)
+    voiced_sec = voiced_samples / ASR_SAMPLE_RATE
+    voiced_ratio = voiced_samples / max(1, int(trimmed.shape[0]))
+    if voiced_sec < MIC_MIN_VOICED_SEC or voiced_ratio < MIC_MIN_VOICED_RATIO:
+        return None, "当前片段有效语音过少，已按静音跳过。"
+    return trimmed, ""
+
+
+def build_asr_context(transcript_parts: list[str]) -> str | None:
+    if not transcript_parts:
+        return None
+    latest = transcript_parts[-1].strip()
+    if not latest:
+        return None
+    if len(latest) <= MIC_ASR_CONTEXT_MAX_CHARS:
+        return latest
+    return latest[-MIC_ASR_CONTEXT_MAX_CHARS:].lstrip()
 
 
 def resample_audio_output(audio_np: np.ndarray, source_sample_rate: int, target_sample_rate: int) -> np.ndarray:
@@ -587,26 +648,53 @@ class LiveSpeechWorker(QObject):
             self._tts_warm_reference_audio_path = self.reference_audio_path
             self._mark_model_used("tts")
 
-    def _resolve_input_audio_format(self) -> tuple[QAudioDevice, QAudioFormat]:
-        input_device = _resolve_audio_device(self.input_device, output=False)
-        preferred_rate = int(input_device.preferredFormat().sampleRate() or 0)
+    def _resolve_input_stream_settings(self) -> tuple[int | None, int]:
+        device_index: int | None = None
+        device_name = (self.input_device_label or "").strip()
+
+        if device_name:
+            normalized_target = device_name.casefold()
+            for index, device in enumerate(sd.query_devices()):
+                if int(device.get("max_input_channels") or 0) <= 0:
+                    continue
+                current_name = str(device.get("name") or "").strip()
+                normalized_name = current_name.casefold()
+                if normalized_target == normalized_name or normalized_target in normalized_name:
+                    device_index = index
+                    break
+
+        default_rate = 0
+        if device_index is not None:
+            device_info = sd.query_devices(device_index, "input")
+            default_rate = int(round(float(device_info.get("default_samplerate") or 0.0)))
+        else:
+            try:
+                default_input_index = sd.default.device[0]
+            except Exception:
+                default_input_index = None
+            if isinstance(default_input_index, int) and default_input_index >= 0:
+                device_index = default_input_index
+                device_info = sd.query_devices(device_index, "input")
+                default_rate = int(round(float(device_info.get("default_samplerate") or 0.0)))
+
         candidate_rates: list[int] = []
-        for rate in (preferred_rate, 48_000, 44_100, 32_000, ASR_SAMPLE_RATE):
+        for rate in (default_rate, 48_000, 44_100, 32_000, ASR_SAMPLE_RATE):
             if rate > 0 and rate not in candidate_rates:
                 candidate_rates.append(rate)
 
-        audio_format = _build_supported_audio_format(
-            input_device,
-            candidate_rates,
-            [MIC_CHANNELS, 2],
-            [
-                QAudioFormat.SampleFormat.Int16,
-                QAudioFormat.SampleFormat.Float,
-                QAudioFormat.SampleFormat.Int32,
-                QAudioFormat.SampleFormat.UInt8,
-            ],
-        )
-        return input_device, audio_format
+        last_error: Exception | None = None
+        for candidate in candidate_rates:
+            try:
+                sd.check_input_settings(device=device_index, channels=MIC_CHANNELS, samplerate=candidate, dtype="float32")
+                return device_index, candidate
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise RuntimeError(
+                f"当前录音设备不支持可用采样率: {self.input_device_label or '系统默认输入'} | {last_error}"
+            ) from last_error
+        raise RuntimeError("未找到可用的录音设备。")
 
     def preload_models(self, payload: object = None) -> None:
         reference_audio_path: str | None = None
@@ -652,8 +740,7 @@ class LiveSpeechWorker(QObject):
             self.error.emit(str(exc))
 
     def _record_microphone_segments(self, segment_queue: Queue[object]) -> None:
-        input_device, audio_format = self._resolve_input_audio_format()
-        capture_sample_rate = int(audio_format.sampleRate())
+        input_device, capture_sample_rate = self._resolve_input_stream_settings()
         blocksize = int(capture_sample_rate * MIC_BLOCK_SEC)
         preroll_blocks = max(1, int(MIC_PREROLL_SEC / MIC_BLOCK_SEC))
         preroll: list[np.ndarray] = []
@@ -666,7 +753,7 @@ class LiveSpeechWorker(QObject):
         self._emit_status(f"开始录音，请说话... 当前采集采样率 {capture_sample_rate} Hz")
         start_time = time.monotonic()
 
-        def flush_current_segment() -> None:
+        def flush_current_segment(*, discard: bool = False) -> None:
             nonlocal current_segment, speech_started, emitted_segments
             if not current_segment:
                 speech_started = False
@@ -675,6 +762,9 @@ class LiveSpeechWorker(QObject):
             duration = waveform.shape[0] / capture_sample_rate
             current_segment = []
             speech_started = False
+            if discard:
+                self._emit_status("已停止麦克风采集，丢弃未完成语音段。")
+                return
             if duration < MIC_MIN_SEGMENT_SEC:
                 return
             if capture_sample_rate != ASR_SAMPLE_RATE:
@@ -698,7 +788,7 @@ class LiveSpeechWorker(QObject):
                     current_segment = list(preroll)
                     preroll.clear()
                     current_segment.append(block)
-                    self._emit_status("检测到语音，继续录制...")
+                    self._emit_status("检测到语音，持续录制直到明显停顿...")
             else:
                 current_segment.append(block)
                 if rms >= MIC_SILENCE_THRESHOLD:
@@ -707,92 +797,47 @@ class LiveSpeechWorker(QObject):
             active_segment_duration = (
                 sum(chunk.shape[0] for chunk in current_segment) / capture_sample_rate if current_segment else 0.0
             )
-            segment_silence_sec = (
-                MIC_SHORT_SEGMENT_SILENCE_SEC
-                if active_segment_duration < MIC_SHORT_SEGMENT_SEC
-                else MIC_SEGMENT_SILENCE_SEC
-            )
 
-            if speech_started and (now - last_voice_time) >= segment_silence_sec:
+            if speech_started and (now - last_voice_time) >= MIC_SESSION_END_SILENCE_SEC:
+                flush_current_segment()
+            elif speech_started and active_segment_duration >= self.max_record_sec:
+                self._emit_status(
+                    f"单段语音已达到 {self.max_record_sec:.0f} 秒，已强制提交当前整段识别。"
+                )
                 flush_current_segment()
             
             if self._stop_event.is_set():
                 if speech_started:
-                    flush_current_segment()
+                    flush_current_segment(discard=True)
                 finished = True
 
         try:
-            audio_source = QAudioSource(input_device, audio_format)
-            bytes_per_frame = max(1, int(audio_format.bytesPerFrame()))
-            audio_source.setBufferSize(max(blocksize * bytes_per_frame * 4, 16_384))
-            io_device = audio_source.start()
-            if io_device is None:
-                raise RuntimeError(f"无法启动录音设备: {input_device.description()}")
-
-            pending_chunks: deque[np.ndarray] = deque()
-            pending_size = 0
-
-            def pop_pending_block() -> np.ndarray | None:
-                nonlocal pending_size
-                if pending_size < blocksize:
-                    return None
-
-                parts: list[np.ndarray] = []
-                remaining = blocksize
-                while remaining > 0 and pending_chunks:
-                    chunk = pending_chunks[0]
-                    chunk_size = int(chunk.shape[0])
-                    if chunk_size <= remaining:
-                        parts.append(chunk)
-                        pending_chunks.popleft()
-                        pending_size -= chunk_size
-                        remaining -= chunk_size
-                    else:
-                        parts.append(chunk[:remaining])
-                        pending_chunks[0] = chunk[remaining:]
-                        pending_size -= remaining
-                        remaining = 0
-
-                if not parts:
-                    return None
-                if len(parts) == 1:
-                    return parts[0].astype(np.float32, copy=False)
-                return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
-
-            while not finished:
-                available = int(io_device.bytesAvailable())
-                if available > 0:
-                    raw_data = io_device.read(available)
-                    samples = _pcm_bytes_to_float32(raw_data, audio_format)
+            with sd.InputStream(
+                samplerate=capture_sample_rate,
+                channels=MIC_CHANNELS,
+                dtype="float32",
+                device=input_device,
+                blocksize=blocksize,
+            ) as stream:
+                while not finished:
+                    if self._stop_event.is_set():
+                        if speech_started:
+                            flush_current_segment(discard=True)
+                        finished = True
+                        break
+                    block, overflowed = stream.read(blocksize)
+                    if overflowed:
+                        logger.warning("麦克风输入发生溢出，当前块可能不完整。")
+                    samples = np.asarray(block, dtype=np.float32).reshape(-1)
                     if samples.size:
-                        pending_chunks.append(samples)
-                        pending_size += int(samples.shape[0])
-                        while pending_size >= blocksize:
-                            block = pop_pending_block()
-                            if block is None:
-                                break
-                            process_block(block)
-                            if finished:
-                                break
-                else:
-                    time.sleep(0.01)
+                        process_block(samples)
 
-                if self._stop_event.is_set():
-                    if speech_started:
-                        flush_current_segment()
-                    finished = True
-
-            if pending_size > 0 and speech_started:
-                tail = (
-                    pending_chunks[0]
-                    if len(pending_chunks) == 1
-                    else np.concatenate(list(pending_chunks), axis=0)
-                )
-                current_segment.append(tail.astype(np.float32, copy=False))
-
-            audio_source.stop()
-            if current_segment:
+            if current_segment and not self._stop_event.is_set():
                 flush_current_segment()
+            if self._stop_event.is_set():
+                self._emit_status("麦克风任务已停止。")
+                segment_queue.put(None)
+                return
             if emitted_segments == 0:
                 raise RuntimeError("没有检测到有效语音输入，请重试。")
             self._emit_status(f"录音阶段结束，共捕获 {emitted_segments} 段语音。")
@@ -1001,8 +1046,11 @@ class LiveSpeechWorker(QObject):
                 transcript_parts: list[str] = []
                 latest_transcript = ""
                 asr_segment_index = 0
+                last_asr_activity_at: float | None = None
 
                 while True:
+                    if self._stop_event.is_set():
+                        break
                     try:
                         queued = segment_queue.get(timeout=0.1)
                     except Empty:
@@ -1017,6 +1065,18 @@ class LiveSpeechWorker(QObject):
                     waveform = queued
                     if not isinstance(waveform, np.ndarray):
                         continue
+                    if self._stop_event.is_set():
+                        break
+
+                    now = time.monotonic()
+                    if (
+                        transcript_parts
+                        and last_asr_activity_at is not None
+                        and (now - last_asr_activity_at) >= MIC_SESSION_END_SILENCE_SEC
+                    ):
+                        transcript_parts.clear()
+                        self._last_tts_transcript_key = None
+                        self._emit_status("静默较久，已重置 ASR 上下文，避免重复补全上一句。")
 
                     # --- Voiceprint Filter Check ---
                     if self.user_voiceprint is not None and self.user_voiceprint.size > 0 and self.index_tts_service is not None:
@@ -1030,6 +1090,14 @@ class LiveSpeechWorker(QObject):
                             waveform = filtered_waveform
                         except Exception as e:
                             logger.error("声纹过滤失败: {}", e)
+
+                    trimmed_waveform, trim_message = trim_waveform_for_asr(waveform)
+                    if trim_message:
+                        self._emit_status(trim_message)
+                    if trimmed_waveform is None:
+                        continue
+                    waveform = trimmed_waveform
+                    last_asr_activity_at = now
 
                     asr_segment_index += 1
                     segment_emo_vector = self.index_emo_vector
@@ -1045,7 +1113,7 @@ class LiveSpeechWorker(QObject):
                             )
                             self.auto_emotion_enabled = False
                     self._emit_status(f"正在识别第 {asr_segment_index} 段语音...")
-                    asr_context = "".join(transcript_parts[-2:]).strip() or None
+                    asr_context = build_asr_context(transcript_parts)
                     self._mark_model_used("asr")
                     result = self.asr_service.transcribe(
                         ASRRequest(
@@ -1080,6 +1148,11 @@ class LiveSpeechWorker(QObject):
                     )
 
                 recorder_thread.join(timeout=1.0)
+                if self._stop_event.is_set():
+                    transcript = latest_transcript or "\n".join(transcript_parts).strip()
+                    self._emit_status("麦克风任务已停止。")
+                    self.finished.emit(transcript)
+                    return
                 final_transcript = "\n".join(transcript_parts).strip()
                 if not final_transcript:
                     raise RuntimeError("ASR 结果为空，无法继续 TTS。")
@@ -1179,6 +1252,9 @@ class LiveSpeechWorker(QObject):
 
     def unload_asr(self) -> None:
         self._unload_asr()
+
+    def unload_emotion(self) -> None:
+        self._unload_emotion()
 
     def reload_asr(self) -> None:
         if self.asr_service is not None:
