@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,9 @@ class IndexTTSService:
         self._tts: Any = None
         self._model_dir_str = str(self.model_dir)
         self._lock = threading.RLock()
+        self._state_changed = threading.Condition(self._lock)
+        self._active_operation_count = 0
+        self._unload_in_progress = False
 
     # ------------------------------------------------------------------ #
     #  load / unload
@@ -200,6 +204,8 @@ class IndexTTSService:
 
     def load(self) -> None:
         with self._lock:
+            while self._unload_in_progress:
+                self._state_changed.wait()
             if self._tts is not None:
                 return
             if not self.model_dir.exists():
@@ -227,52 +233,64 @@ class IndexTTSService:
                 device=self.device if str(self.device).startswith("cuda") else None,
                 use_cuda_kernel=True,
                 use_accel=use_accel,
+                use_torch_compile=True,
             )
             logger.info("IndexTTS-2 加载完成")
 
     def warmup_speaker(self, reference_audio_path: str, emo_vector: list[float] | None = None) -> None:
         """预热并缓存说话人参考音频的特征，避免首次推理时产生 2~3 秒延迟。"""
-        with self._lock:
-            if self._tts is None:
-                return
-            logger.info("正在预热 TTS 参考音频特征: {}", reference_audio_path)
-            try:
-                # 调用一次空文本推理来强制 TTS 提取并缓存特征
-                gen = self._tts.infer(
-                    spk_audio_prompt=reference_audio_path,
-                    text=".",
-                    output_path="",
-                    verbose=False,
-                    emo_vector=emo_vector,
-                    stream_return=True,
-                )
-                for _ in gen:
-                    pass
-                logger.info("TTS 参考音频特征预热完成")
-            except Exception as e:
-                logger.warning("TTS 参考音频预热失败: {}", e)
+        try:
+            with self._use_tts(required=False) as tts:
+                if tts is None:
+                    return
+                logger.info("正在预热 TTS 参考音频特征: {}", reference_audio_path)
+                try:
+                    # 调用一次空文本推理来强制 TTS 提取并缓存特征
+                    gen = tts.infer(
+                        spk_audio_prompt=reference_audio_path,
+                        text=".",
+                        output_path="",
+                        verbose=False,
+                        emo_vector=emo_vector,
+                        stream_return=True,
+                    )
+                    for _ in gen:
+                        pass
+                    logger.info("TTS 参考音频特征预热完成")
+                except Exception as e:
+                    logger.warning("TTS 参考音频预热失败: {}", e)
+        finally:
+            release_memory()
 
 
     def unload(self) -> None:
         with self._lock:
+            while self._unload_in_progress:
+                self._state_changed.wait()
             if self._tts is None:
                 return
+            self._unload_in_progress = True
             tts = self._tts
             self._tts = None
-        for attr in ("gpt", "bigvgan", "s2mel", "semantic_model", "semantic_codec", "campplus_model", "qwen_emo"):
-            obj = getattr(tts, attr, None)
-            if obj is not None and hasattr(obj, "cpu"):
-                obj.cpu()
-                del obj
-        del tts
-        release_memory()
-        logger.info("IndexTTS-2 已卸载")
+            while self._active_operation_count > 0:
+                self._state_changed.wait()
+        try:
+            for attr in ("gpt", "bigvgan", "s2mel", "semantic_model", "semantic_codec", "campplus_model", "qwen_emo"):
+                obj = getattr(tts, attr, None)
+                if obj is not None and hasattr(obj, "cpu"):
+                    obj.cpu()
+                    del obj
+            del tts
+            release_memory()
+            logger.info("IndexTTS-2 已卸载")
+        finally:
+            with self._lock:
+                self._unload_in_progress = False
+                self._state_changed.notify_all()
 
     def extract_voiceprints_batch(self, audio_list: list[np.ndarray], sample_rate: int) -> np.ndarray:
         """批量提取 CAM++ 声纹向量，返回 shape=(N, 192) 的 float32 数组。"""
-        with self._lock:
-            if self._tts is None:
-                raise RuntimeError("IndexTTS-2 service is not loaded. Call .load() first.")
+        with self._use_tts() as tts:
             if not audio_list:
                 return np.empty((0, 192), dtype=np.float32)
 
@@ -308,10 +326,10 @@ class IndexTTSService:
                 feature_batch[index, :frame_count, :] = feat
 
             with torch.no_grad():
-                if hasattr(self._tts, "_compute_campplus_style"):
-                    style = self._tts._compute_campplus_style(feature_batch)
+                if hasattr(tts, "_compute_campplus_style"):
+                    style = tts._compute_campplus_style(feature_batch)
                 else:
-                    style = self._tts.campplus_model(feature_batch.to(self._tts.device))
+                    style = tts.campplus_model(feature_batch.to(tts.device))
                 return style.cpu().numpy().astype(np.float32, copy=False)
             
     def extract_voiceprint(self, audio_np: np.ndarray, sample_rate: int) -> list[float]:
@@ -344,10 +362,8 @@ class IndexTTSService:
         )
 
         try:
-            with self._lock:
-                if self._tts is None:
-                    raise RuntimeError("IndexTTS-2 服务尚未加载，请先调用 .load()。")
-                result = self._tts.infer(
+            with self._use_tts(error_message="IndexTTS-2 服务尚未加载，请先调用 .load()。") as tts:
+                result = tts.infer(
                     spk_audio_prompt=reference_audio_path,
                     text=text,
                     output_path=output_path or "",
@@ -404,12 +420,10 @@ class IndexTTSService:
 
         sample_rate = 22050
         try:
-            with self._lock:
-                if self._tts is None:
-                    raise RuntimeError("IndexTTS-2 service is not loaded. Call .load() first.")
+            with self._use_tts() as tts:
                 for chunk_index, text_chunk in enumerate(text_chunks, start=1):
                     logger.debug("IndexTTS-2 流式分块 {}/{}: {!r}", chunk_index, len(text_chunks), text_chunk)
-                    gen = self._tts.infer(
+                    gen = tts.infer(
                         spk_audio_prompt=reference_audio_path,
                         text=text_chunk,
                         output_path="",
@@ -446,3 +460,30 @@ class IndexTTSService:
                         yield wav, sample_rate
         finally:
             release_memory()
+
+    @contextmanager
+    def _use_tts(
+        self,
+        *,
+        required: bool = True,
+        error_message: str = "IndexTTS-2 service is not loaded. Call .load() first.",
+    ):
+        tts: Any | None = None
+        with self._lock:
+            while self._unload_in_progress or self._active_operation_count > 0:
+                self._state_changed.wait()
+            tts = self._tts
+            if tts is None:
+                if required:
+                    raise RuntimeError(error_message)
+            else:
+                self._active_operation_count += 1
+        if tts is None:
+            yield None
+            return
+        try:
+            yield tts
+        finally:
+            with self._lock:
+                self._active_operation_count -= 1
+                self._state_changed.notify_all()

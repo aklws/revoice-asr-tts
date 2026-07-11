@@ -44,6 +44,10 @@
 `- main.py               # Python 入口
 ```
 
+## 运行原理
+
+![Revoice ASR-TTS Principle](./asset/Principle.png)
+
 ## 环境要求
 
 - 操作系统：推荐 `Windows`

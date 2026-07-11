@@ -108,7 +108,12 @@ class IndexTTS2:
                 use_deepspeed = False
                 logger.warning("加载 DeepSpeed 失败，已回退到常规推理。错误: {}", e)
 
-        self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
+        self.gpt.post_init_gpt2_config(
+            use_deepspeed=use_deepspeed,
+            kv_cache=True,
+            half=self.use_fp16,
+            use_torch_compile=self.use_torch_compile,
+        )
 
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
@@ -143,12 +148,13 @@ class IndexTTS2:
         )
         self.s2mel = s2mel.to(self.device)
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
-        
-        # Enable torch.compile optimization if requested
         if self.use_torch_compile:
-            logger.info("正在启用 torch.compile 优化")
-            self.s2mel.enable_torch_compile()
-            logger.info("torch.compile 优化已启用")
+            try:
+                logger.info("正在启用 s2mel torch.compile 优化")
+                self.s2mel.enable_torch_compile()
+                logger.info("s2mel torch.compile 优化已启用")
+            except Exception as e:
+                logger.warning("启用 s2mel torch.compile 失败，已回退到常规推理。错误: {}", e)
         
         self.s2mel.eval()
         logger.info("s2mel 权重已从以下路径恢复: {}", s2mel_path)
@@ -285,7 +291,7 @@ class IndexTTS2:
     def _compute_campplus_style(self, feature_batch):
         campplus_model = self._get_campplus_model()
         feature_batch = feature_batch.detach().to("cpu", dtype=torch.float32)
-        with torch.no_grad():
+        with torch.inference_mode():
             return campplus_model(feature_batch)
 
     def remove_long_silence(self, codes: torch.Tensor, silent_token=52, max_consecutive=30):
@@ -720,7 +726,7 @@ class IndexTTS2:
                 logger.debug("text_token_syms 是否与当前分段一致: {}", text_token_syms == sent)
 
             m_start_time = time.perf_counter()
-            with torch.no_grad():
+            with torch.inference_mode():
                 with torch.amp.autocast(text_tokens.device.type, enabled=self.dtype is not None, dtype=self.dtype):
                     emovec = self.gpt.merge_emovec(
                         spk_cond_emb,

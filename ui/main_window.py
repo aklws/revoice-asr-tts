@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from PySide6.QtCore import Q_ARG, QMetaObject, QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -41,11 +40,11 @@ from app.core.runtime import get_gpu_total_memory_gb
 from ui.theme import DEFAULT_THEME, THEME_OPTIONS, get_theme_stylesheet
 from ui.window_chrome import apply_window_chrome_theme
 from ui.waveform_widget import WaveformWidget
-from ui.workers import LiveSpeechWorker
+from ui.workers import LiveSpeechWorker, LiveWorkerState
 
 
 logger = get_logger(__name__)
-APP_VERSION = "v0.0.3"
+APP_VERSION = "v0.0.4"
 APP_DISPLAY_NAME = f"Revoice ASR-TTS {APP_VERSION}"
 SETTINGS_ICON_PATH = get_bundle_file("ui", "assets", "settings_gear.svg")
 EMOTION_PRESETS: tuple[tuple[str, str | None], ...] = (
@@ -96,10 +95,12 @@ class MainWindow(QMainWindow):
     live_preload_requested = Signal(object)
     live_run_requested = Signal(object)
     live_stop_requested = Signal()
+    live_extract_voiceprint_requested = Signal(object)
     live_shutdown_requested = Signal()
     live_asr_unload_requested = Signal()
     live_emotion_unload_requested = Signal()
     live_asr_reload_requested = Signal()
+    voiceprint_capture_failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -110,7 +111,9 @@ class MainWindow(QMainWindow):
         self.settings = get_settings()
         self._live_worker_thread: QThread | None = None
         self._live_worker: LiveSpeechWorker | None = None
+        self._live_worker_state = LiveWorkerState.INITIALIZING.value
         self._models_ready = False
+        self._record_voiceprint_feedback_token = 0
         self._pending_reference_preload = False
         self._input_devices: list[tuple[str, str]] = []
         self._input_device_name_by_key: dict[str, str] = {}
@@ -138,6 +141,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self._on_input_mode_changed()
         self._apply_theme(self._current_theme)
+        self.voiceprint_capture_failed.connect(self._on_voiceprint_capture_failed)
 
         self._log_startup()
         self._start_live_backend()
@@ -1037,9 +1041,9 @@ class MainWindow(QMainWindow):
             if hasattr(self, "live_transcript_view"):
                 self.live_transcript_view.setFocus()
             self.live_emotion_unload_requested.emit()
-            if self._live_worker is not None and self._live_worker._busy:
+            if self._is_live_worker_active():
                 self._set_live_status("正在停止麦克风任务...", "busy")
-                self._live_worker.stop_live()
+                self.live_stop_requested.emit()
             else:
                 self.live_asr_unload_requested.emit()
         else:
@@ -1225,87 +1229,91 @@ class MainWindow(QMainWindow):
                 return 100 - rank
         return 1
 
+    @Slot()
     def _on_record_voiceprint_clicked(self) -> None:
-        if self._live_worker is not None and self._live_worker._busy:
+        if self._is_live_worker_active():
             self._show_message(QMessageBox.Warning, "正在变声", "请先关闭麦克风再录制声纹。")
             return
-            
-        self.record_voiceprint_button.setEnabled(False)
-        self._set_text_if_changed(self.record_voiceprint_button, "请朗读：「测试一二三，开启声纹锁定」(3秒)")
-        
+
+        self._record_voiceprint_feedback_token += 1
+        self._set_record_voiceprint_button("请朗读：「测试一二三，开启声纹锁定」(3秒)", enabled=False)
+        self._start_live_backend()
+
         def _record_task() -> None:
             try:
-                # Record 3 seconds at 16000 Hz
                 duration = 3.0
                 sr = 16000
-                
-                # Resolve sounddevice input index from current combo box text
+
                 current_device_key = self.input_device_combo.currentData()
                 device_name = ""
                 if isinstance(current_device_key, str) and current_device_key:
                     device_name = self._input_device_name_by_key.get(current_device_key, "")
                 if not device_name:
                     device_name = self._extract_device_display_name(self.input_device_combo.currentText())
-                
+
                 sd_device = None
                 if device_name:
                     for i, dev in enumerate(sd.query_devices()):
                         if dev['max_input_channels'] > 0 and device_name in dev['name']:
                             sd_device = i
                             break
-                            
-                # sd.rec is non-blocking, but we use sd.wait() to block the thread
+
                 recording = sd.rec(int(duration * sr), samplerate=sr, channels=1, dtype='float32', device=sd_device)
                 sd.wait()
-                
-                # Extract voiceprint
-                if not self._models_ready or self._live_worker is None or self._live_worker.index_tts_service is None:
-                    # Need to ensure TTS is loaded
-                    self._start_live_backend()
-                    while self._live_worker is None or self._live_worker.index_tts_service is None:
-                        time.sleep(0.1)
-                        if self._live_worker and self._live_worker.index_tts_service:
-                            break
-                            
-                vp = self._live_worker.index_tts_service.extract_voiceprint(recording.flatten(), sr)
-                self.user_voiceprint = vp
-                
-                # Update UI
-                self._update_record_btn_text("录制完成！")
-                time.sleep(2)
-                self._update_record_btn_text("重新录制声纹")
-                
-                # Automatically enable the checkbox
-                self._enable_voiceprint_cb(True)
-                
+
+                self.live_extract_voiceprint_requested.emit(
+                    {
+                        "audio": recording.flatten(),
+                        "sample_rate": sr,
+                    }
+                )
             except Exception as e:
-                self._update_record_btn_text("录制失败")
                 logger.error("录制声纹失败: {}", e)
+                self.voiceprint_capture_failed.emit(str(e))
 
         threading.Thread(target=_record_task, daemon=True).start()
 
-    def _update_record_btn_text(self, text: str) -> None:
-        QMetaObject.invokeMethod(
-            self.record_voiceprint_button,
-            "setText",
-            Qt.QueuedConnection,
-            Q_ARG(str, text)
-        )
-        if "完成" in text or "重新" in text or "失败" in text:
-            QMetaObject.invokeMethod(
-                self.record_voiceprint_button,
-                "setEnabled",
-                Qt.QueuedConnection,
-                Q_ARG(bool, True)
-            )
+    def _set_record_voiceprint_button(self, text: str, *, enabled: bool | None = None) -> None:
+        self._set_text_if_changed(self.record_voiceprint_button, text)
+        if enabled is not None:
+            self.record_voiceprint_button.setEnabled(enabled)
 
-    def _enable_voiceprint_cb(self, checked: bool) -> None:
-        QMetaObject.invokeMethod(
-            self.enable_voiceprint_checkbox,
-            "setChecked",
-            Qt.QueuedConnection,
-            Q_ARG(bool, checked)
-        )
+    def _schedule_record_voiceprint_button_reset(self) -> None:
+        token = self._record_voiceprint_feedback_token
+
+        def reset_button() -> None:
+            if token != self._record_voiceprint_feedback_token:
+                return
+            self._set_record_voiceprint_button("重新录制声纹", enabled=True)
+
+        QTimer.singleShot(2000, reset_button)
+
+    @Slot(str)
+    def _on_voiceprint_capture_failed(self, message: str) -> None:
+        self._record_voiceprint_feedback_token += 1
+        self._set_record_voiceprint_button("录制失败", enabled=True)
+        logger.error("录制声纹失败: {}", message)
+
+    @Slot(object)
+    def _on_voiceprint_ready(self, voiceprint: object) -> None:
+        if isinstance(voiceprint, np.ndarray):
+            self.user_voiceprint = voiceprint.astype(np.float32, copy=False).tolist()
+        elif isinstance(voiceprint, (list, tuple)) and voiceprint:
+            self.user_voiceprint = [float(value) for value in voiceprint]
+        else:
+            self._on_voiceprint_error("提取到的声纹结果无效。")
+            return
+
+        self._record_voiceprint_feedback_token += 1
+        self._set_record_voiceprint_button("录制完成！", enabled=True)
+        self.enable_voiceprint_checkbox.setChecked(True)
+        self._schedule_record_voiceprint_button_reset()
+
+    @Slot(str)
+    def _on_voiceprint_error(self, message: str) -> None:
+        self._record_voiceprint_feedback_token += 1
+        self._set_record_voiceprint_button("录制失败", enabled=True)
+        logger.error("提取声纹失败: {}", message)
 
     def _build_live_preload_payload(self, reference_audio_path: str | None = None) -> dict[str, str]:
         reference_path = (
@@ -1318,14 +1326,17 @@ class MainWindow(QMainWindow):
             "input_mode": self._current_input_mode(),
         }
 
+    @Slot()
     def _on_live_start_clicked(self) -> None:
         input_mode = self._current_input_mode()
-        if input_mode == "microphone" and self._live_worker is not None and self._live_worker._busy:
+        if input_mode == "microphone" and self._live_worker_state == LiveWorkerState.RUNNING.value:
             self.live_start_button.setEnabled(False)
             self.live_start_button.setText("正在停止...")
-            self._live_worker.stop_live()
+            self.live_stop_requested.emit()
             return
-        
+        if input_mode == "microphone" and self._live_worker_state == LiveWorkerState.STOPPING.value:
+            return
+
         self._start_live_speech()
 
     def _start_live_speech(self) -> None:
@@ -1387,6 +1398,7 @@ class MainWindow(QMainWindow):
         if self._live_worker_thread is not None:
             return
         self._models_ready = False
+        self._live_worker_state = LiveWorkerState.INITIALIZING.value
         self._refresh_live_start_button()
         self._set_live_status("正在初始化引擎...", "busy")
         self._live_worker_thread = QThread(self)
@@ -1396,16 +1408,20 @@ class MainWindow(QMainWindow):
         self._live_worker.moveToThread(self._live_worker_thread)
         self.live_preload_requested.connect(self._live_worker.preload_models)
         self.live_run_requested.connect(self._live_worker.run_once)
-        self.live_stop_requested.connect(self._live_worker.stop_live)
+        self.live_stop_requested.connect(self._live_worker.stop_live, Qt.DirectConnection)
+        self.live_extract_voiceprint_requested.connect(self._live_worker.extract_voiceprint)
         self.live_shutdown_requested.connect(self._live_worker.shutdown)
         self.live_asr_unload_requested.connect(self._live_worker.unload_asr)
         self.live_emotion_unload_requested.connect(self._live_worker.unload_emotion)
         self.live_asr_reload_requested.connect(self._live_worker.reload_asr)
         self._live_worker.ready.connect(self._on_live_ready)
         self._live_worker.status.connect(self._on_worker_status)
+        self._live_worker.runtime_state.connect(self._on_live_runtime_state)
         self._live_worker.emotion_state.connect(self._on_worker_emotion_state)
         self._live_worker.transcript.connect(self._on_live_transcript)
         self._live_worker.waveform.connect(self._on_waveform_chunk)
+        self._live_worker.voiceprint_ready.connect(self._on_voiceprint_ready)
+        self._live_worker.voiceprint_error.connect(self._on_voiceprint_error)
         self._live_worker.finished.connect(self._on_live_finished)
         self._live_worker.error.connect(self._on_worker_error)
         self._live_worker_thread.start()
@@ -1414,6 +1430,8 @@ class MainWindow(QMainWindow):
     def _shutdown_live_backend(self) -> None:
         if self._live_worker_thread is None:
             return
+        if self._live_worker is not None:
+            self._live_worker.stop_live()
         self.live_shutdown_requested.emit()
         self._live_worker_thread.quit()
         self._live_worker_thread.wait(5000)
@@ -1422,9 +1440,11 @@ class MainWindow(QMainWindow):
         self._live_worker_thread.deleteLater()
         self._live_worker = None
         self._live_worker_thread = None
+        self._live_worker_state = LiveWorkerState.INITIALIZING.value
         self._models_ready = False
         self._refresh_live_start_button()
 
+    @Slot()
     def _on_live_ready(self) -> None:
         self._models_ready = True
         if self._pending_reference_preload and self.live_reference_audio_edit.text().strip():
@@ -1438,10 +1458,17 @@ class MainWindow(QMainWindow):
         self._set_live_status("引擎已就绪，等待开始", "ready")
         logger.info("UI 模型预加载完成")
 
+    @Slot(str)
+    def _on_live_runtime_state(self, state: str) -> None:
+        self._live_worker_state = state or LiveWorkerState.INITIALIZING.value
+        self._refresh_live_start_button()
+
+    @Slot(str)
     def _on_worker_status(self, message: str) -> None:
         self._set_live_status(message, self._infer_status_state(message))
         logger.info("{}", message)
 
+    @Slot(object)
     def _on_worker_emotion_state(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
@@ -1453,6 +1480,7 @@ class MainWindow(QMainWindow):
             self._apply_auto_emotion_vector(list(raw_vector), float(applied_alpha) if applied_alpha is not None else None)
         self._update_auto_emotion_ui(summary, state)
 
+    @Slot(str)
     def _on_live_finished(self, transcript: str) -> None:
         if self._current_input_mode() == "text":
             self._set_text_edit_if_changed(self.live_transcript_view, transcript)
@@ -1466,9 +1494,11 @@ class MainWindow(QMainWindow):
             self._set_text_if_changed(self.workspace_wave_hint, "波形已刷新")
         logger.info("实时链路处理完成")
 
+    @Slot(str)
     def _on_live_transcript(self, transcript: str) -> None:
         self._set_text_edit_if_changed(self.live_transcript_view, transcript)
 
+    @Slot(object)
     def _on_waveform_chunk(self, audio) -> None:
         self.waveform_widget.append_audio_chunk(audio)
         if hasattr(self, "workspace_wave_hint"):
@@ -1481,6 +1511,7 @@ class MainWindow(QMainWindow):
         compact = "".join(text.split())
         self._set_text_if_changed(self.workspace_counter_label, f"{len(compact)} 字")
 
+    @Slot(str)
     def _on_worker_error(self, message: str) -> None:
         self._set_live_status("处理失败", "error")
         self._update_auto_emotion_ui("", "error")
@@ -1492,9 +1523,20 @@ class MainWindow(QMainWindow):
         self._set_live_status_label_state(text, state)
         self._refresh_workspace_summary(status_override=text)
 
+    def _is_live_worker_active(self) -> bool:
+        return self._live_worker_state in {
+            LiveWorkerState.RUNNING.value,
+            LiveWorkerState.STOPPING.value,
+        }
+
     def _refresh_live_start_button(self) -> None:
         input_mode = self._current_input_mode()
-        if self._live_worker is not None and self._live_worker._busy:
+        if self._live_worker_state == LiveWorkerState.STOPPING.value:
+            self._set_text_if_changed(self.live_start_button, "正在停止...")
+            self.live_start_button.setIcon(self._standard_icon(QStyle.SP_BrowserReload))
+            self.live_start_button.setEnabled(False)
+            return
+        if self._live_worker_state == LiveWorkerState.RUNNING.value:
             if input_mode == "microphone":
                 self._set_text_if_changed(self.live_start_button, "关闭麦克风")
                 self.live_start_button.setIcon(self._standard_icon(QStyle.SP_MediaStop))

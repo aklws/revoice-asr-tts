@@ -44,6 +44,12 @@
 `- main.py               # Python entry point
 ```
 
+## Principle
+
+![Revoice ASR-TTS Principle](./asset/Principle.png)
+
+
+
 ## Requirements
 
 - OS: `Windows` recommended
