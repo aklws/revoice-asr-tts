@@ -413,7 +413,39 @@ class UnifiedVoice(nn.Module):
         self.use_accel = use_accel
         self.accel_engine = None  # Will be initialized in post_init_gpt2_config
 
-    def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
+    def _maybe_enable_torch_compile(self) -> None:
+        if not hasattr(torch, "compile"):
+            logger.info("当前 PyTorch 版本不支持 torch.compile，跳过 GPT 主干编译。")
+            return
+        if self.accel_engine is not None:
+            logger.info("Accel GPT 已启用，跳过 GPT 主干 torch.compile。")
+            return
+        if hasattr(self, "ds_engine"):
+            logger.info("DeepSpeed 已启用，跳过 GPT 主干 torch.compile。")
+            return
+        try:
+            device_type = next(self.gpt.parameters()).device.type
+        except StopIteration:
+            logger.warning("无法确定 GPT 主干设备，跳过 torch.compile。")
+            return
+        if device_type != "cuda":
+            logger.info("当前 GPT 主干运行在 {}，跳过 torch.compile。", device_type)
+            return
+        try:
+            compile_kwargs = {
+                "backend": "inductor",
+                "mode": "max-autotune-no-cudagraphs",
+                "fullgraph": False,
+                "dynamic": True,
+            }
+            compiled_transformer = torch.compile(self.gpt, **compile_kwargs)
+            self.gpt = compiled_transformer
+            self.inference_model.transformer = compiled_transformer
+            logger.info("GPT 主干 torch.compile 已启用: backend=inductor, mode=max-autotune-no-cudagraphs, dynamic=True")
+        except Exception as e:
+            logger.warning("启用 GPT 主干 torch.compile 失败，已回退到常规推理。错误: {}", e)
+
+    def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False, use_torch_compile=False):
         seq_length = self.max_mel_tokens + self.max_text_tokens + 2
         gpt_config = GPT2Config(
             vocab_size=self.number_mel_codes,
@@ -479,6 +511,8 @@ class UnifiedVoice(nn.Module):
 
         # self.inference_model = PrunedGPT2InferenceModel(gpt_config, self.gpt, self.mel_pos_embedding, self.mel_embedding, self.final_norm, self.mel_head)
         self.gpt.wte = self.mel_embedding
+        if use_torch_compile:
+            self._maybe_enable_torch_compile()
 
     def build_aligned_inputs_and_targets(self, input, start_token, stop_token):
         inp = F.pad(input, (1, 0), value=start_token)

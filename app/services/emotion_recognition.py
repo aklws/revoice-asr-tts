@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import faulthandler
+import io
 import importlib
 import tempfile
 import threading
@@ -223,24 +224,19 @@ class EmotionRecognitionService:
             if sample_rate != EMOTION2VEC_SAMPLE_RATE:
                 waveform = resample_waveform(waveform, sample_rate, EMOTION2VEC_SAMPLE_RATE)
 
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
-                temp_path = Path(handle.name)
-            try:
-                sf.write(temp_path, waveform, EMOTION2VEC_SAMPLE_RATE)
-                if self._backend == "funasr":
-                    raw_result = self._pipeline.generate(
-                        str(temp_path),
-                        granularity="utterance",
-                        extract_embedding=False,
-                    )
-                else:
-                    raw_result = self._pipeline(
-                        str(temp_path),
-                        granularity="utterance",
-                        extract_embedding=False,
-                    )
-            finally:
-                temp_path.unlink(missing_ok=True)
+            waveform = np.ascontiguousarray(waveform, dtype=np.float32)
+            if self._backend == "funasr":
+                raw_result = self._pipeline.generate(
+                    waveform,
+                    granularity="utterance",
+                    extract_embedding=False,
+                )
+            else:
+                raw_result = self._pipeline(
+                    self._encode_waveform_to_wav_bytes(waveform, EMOTION2VEC_SAMPLE_RATE),
+                    granularity="utterance",
+                    extract_embedding=False,
+                )
 
             return self._parse_prediction(raw_result)
 
@@ -326,3 +322,9 @@ class EmotionRecognitionService:
             scores=tuple(numeric_scores),
             raw=raw_result,
         )
+
+    @staticmethod
+    def _encode_waveform_to_wav_bytes(waveform: np.ndarray, sample_rate: int) -> bytes:
+        buffer = io.BytesIO()
+        sf.write(buffer, waveform, sample_rate, format="WAV")
+        return buffer.getvalue()

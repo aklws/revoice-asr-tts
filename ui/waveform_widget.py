@@ -27,8 +27,13 @@ WAVEFORM_THEME_COLORS: dict[str, dict[str, str]] = {
 class WaveformWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._samples = np.zeros(0, dtype=np.float32)
         self._max_samples = 48_000 * 20
+        self._sample_buffer = np.zeros(self._max_samples, dtype=np.float32)
+        self._ordered_sample_cache = np.zeros(self._max_samples, dtype=np.float32)
+        self._empty_samples = np.zeros(0, dtype=np.float32)
+        self._ordered_cache_valid = True
+        self._sample_count = 0
+        self._write_pos = 0
         self._theme = "dark"
         self._background_cache = QPixmap()
         self._waveform_cache_valid = False
@@ -43,7 +48,9 @@ class WaveformWidget(QWidget):
         self.setMinimumHeight(180)
 
     def clear_waveform(self) -> None:
-        self._samples = np.zeros(0, dtype=np.float32)
+        self._sample_count = 0
+        self._write_pos = 0
+        self._ordered_cache_valid = True
         self._invalidate_waveform_cache()
         self._schedule_update(force=True)
 
@@ -64,10 +71,7 @@ class WaveformWidget(QWidget):
         # Remove DC offset so the visualization stays centered on the zero line.
         mono = mono - np.mean(mono, dtype=np.float32)
         mono = np.clip(mono, -1.0, 1.0)
-        if self._samples.size == 0:
-            self._samples = mono[-self._max_samples :]
-        else:
-            self._samples = np.concatenate([self._samples, mono])[-self._max_samples :]
+        self._append_samples(mono)
         self._invalidate_waveform_cache()
         self._schedule_update()
 
@@ -94,6 +98,42 @@ class WaveformWidget(QWidget):
         self._cached_upper_path = QPainterPath()
         self._cached_lower_path = QPainterPath()
         self._cached_fill_path = QPainterPath()
+
+    def _append_samples(self, samples: np.ndarray) -> None:
+        if samples.size == 0:
+            return
+        if samples.size >= self._max_samples:
+            self._sample_buffer[:] = samples[-self._max_samples :]
+            self._sample_count = self._max_samples
+            self._write_pos = 0
+            self._ordered_cache_valid = False
+            return
+
+        end_pos = self._write_pos + samples.size
+        if end_pos <= self._max_samples:
+            self._sample_buffer[self._write_pos:end_pos] = samples
+        else:
+            first_chunk = self._max_samples - self._write_pos
+            self._sample_buffer[self._write_pos:] = samples[:first_chunk]
+            self._sample_buffer[: end_pos - self._max_samples] = samples[first_chunk:]
+
+        self._write_pos = end_pos % self._max_samples
+        self._sample_count = min(self._sample_count + samples.size, self._max_samples)
+        self._ordered_cache_valid = False
+
+    def _ordered_samples(self) -> np.ndarray:
+        if self._sample_count == 0:
+            return self._empty_samples
+        if self._sample_count < self._max_samples:
+            return self._sample_buffer[:self._sample_count]
+        if self._write_pos == 0:
+            return self._sample_buffer
+        if not self._ordered_cache_valid:
+            tail_length = self._max_samples - self._write_pos
+            self._ordered_sample_cache[:tail_length] = self._sample_buffer[self._write_pos :]
+            self._ordered_sample_cache[tail_length:] = self._sample_buffer[:self._write_pos]
+            self._ordered_cache_valid = True
+        return self._ordered_sample_cache
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         self._invalidate_background_cache()
@@ -130,7 +170,8 @@ class WaveformWidget(QWidget):
         self._cached_lower_path = QPainterPath()
         self._cached_fill_path = QPainterPath()
 
-        if self._samples.size == 0:
+        samples = self._ordered_samples()
+        if samples.size == 0:
             self._waveform_cache_valid = True
             return
 
@@ -138,7 +179,7 @@ class WaveformWidget(QWidget):
         waveform_width = max(1, rect.width() - 24)
         start_x = float(rect.left() + 12)
         center_y = rect.center().y()
-        upper, lower = self._build_envelope(self._samples, waveform_width)
+        upper, lower = self._build_envelope(samples, waveform_width)
         if upper.size == 0:
             self._waveform_cache_valid = True
             return
@@ -208,7 +249,7 @@ class WaveformWidget(QWidget):
 
         center_y = rect.center().y()
 
-        if self._samples.size == 0:
+        if self._sample_count == 0:
             painter.setPen(QColor(colors["placeholder"]))
             painter.drawText(rect, Qt.AlignCenter, "等待 TTS 生成波形...")
             return
