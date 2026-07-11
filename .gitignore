@@ -33,6 +33,7 @@ outputs/
 *.log
 *.tmp
 *.bak
+settings.json
 
 # Local models and media assets
 checkpoints/

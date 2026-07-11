@@ -15,7 +15,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from app.core.config import DEFAULT_INDEX_TTS_MODEL_DIR, resolve_tts_device
+from app.core.config import DEFAULT_INDEX_TTS_MODEL_DIR, get_settings, resolve_tts_device
 from app.core.logging import get_logger
 from app.core.runtime import release_memory
 from app.core.audio import resample_waveform
@@ -191,6 +191,7 @@ class IndexTTSService:
     def __init__(self, model_dir: Path | None = None) -> None:
         self.model_dir = model_dir or DEFAULT_INDEX_TTS_MODEL_DIR
         self.device = resolve_tts_device()
+        self._use_torch_compile = get_settings().experimental_torch_compile_enabled
         self._tts: Any = None
         self._model_dir_str = str(self.model_dir)
         self._lock = threading.RLock()
@@ -217,12 +218,21 @@ class IndexTTSService:
             if not config_path.exists():
                 raise FileNotFoundError(f"IndexTTS-2 config not found: {config_path}")
 
-            accel_available, compiler_desc = _configure_c_compiler()
             use_accel = False
-            if accel_available:
-                logger.info("检测到 C 编译器 ({}), 但已主动关闭 IndexTTS Accel GPT 以降低显存占用。", compiler_desc)
+            logger.info("IndexTTS Accel GPT 已主动关闭，以降低显存占用。")
+
+            use_torch_compile = self._use_torch_compile
+            if use_torch_compile:
+                compiler_available, compiler_desc = _configure_c_compiler()
+                if compiler_available:
+                    logger.info("实验性 Torch Compile 已启用，检测到可用 C 编译器: {}", compiler_desc)
+                else:
+                    logger.warning(
+                        "实验性 Torch Compile 已开启，但未检测到可用 MSVC/C 编译器环境，已回退到常规推理。"
+                    )
+                    use_torch_compile = False
             else:
-                logger.info("未检测到可用 C 编译器或 MSVC 环境，IndexTTS Accel GPT 保持关闭。")
+                logger.info("实验性 Torch Compile 未启用，使用常规推理路径。")
 
             logger.info("正在加载 IndexTTS-2 模型 (设备={})", self.device)
             index_tts_cls = _load_indextts2_class()
@@ -233,7 +243,7 @@ class IndexTTSService:
                 device=self.device if str(self.device).startswith("cuda") else None,
                 use_cuda_kernel=True,
                 use_accel=use_accel,
-                use_torch_compile=True,
+                use_torch_compile=use_torch_compile,
             )
             logger.info("IndexTTS-2 加载完成")
 

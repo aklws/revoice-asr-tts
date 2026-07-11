@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import get_settings
-from app.core.config import DEFAULT_TTS_MAX_NEW_TOKENS
+from app.core.config import DEFAULT_TTS_MAX_NEW_TOKENS, set_experimental_torch_compile_enabled
 from app.core.logging import get_logger
 from app.core.paths import get_bundle_file
 from app.core.runtime import get_gpu_total_memory_gb
@@ -126,11 +126,13 @@ class MainWindow(QMainWindow):
         self._quick_settings_auto_emotion_checkbox: QCheckBox | None = None
         self._quick_settings_auto_emotion_strength_slider: QSlider | None = None
         self._quick_settings_auto_emotion_strength_label: QLabel | None = None
+        self._quick_settings_torch_compile_checkbox: QCheckBox | None = None
         self._reference_audio_dialog: QFileDialog | None = None
         self._message_dialog: QMessageBox | None = None
         self._manual_index_emo_snapshot: dict[str, object] | None = None
         self._auto_emotion_feature_enabled = False
         self._auto_emotion_strength = 0.75
+        self._experimental_torch_compile_enabled = self.settings.experimental_torch_compile_enabled
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -638,7 +640,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("快速设置")
         dialog.setModal(True)
-        dialog.resize(360, 220)
+        dialog.resize(420, 300)
 
         form = QFormLayout(dialog)
         form.setSpacing(12)
@@ -672,6 +674,20 @@ class MainWindow(QMainWindow):
         auto_strength_row.addWidget(auto_emotion_strength_slider, stretch=1)
         auto_strength_row.addWidget(auto_emotion_strength_label)
         experimental_layout.addLayout(auto_strength_row)
+
+        torch_compile_checkbox = QCheckBox("启用实验性加速（Torch Compile）", dialog)
+        torch_compile_checkbox.setToolTip("默认关闭。启用后需要重启软件。")
+        experimental_layout.addWidget(torch_compile_checkbox)
+
+        torch_compile_hint = QLabel(
+            "默认不启用。开启后会在下次启动时尝试启用 IndexTTS 的 torch.compile 优化。"
+            "该功能仅建议在已安装 Visual Studio Build Tools 2022（含 MSVC C++ x64 / cl.exe）"
+            "且本机 Torch/Triton 环境可用时使用；修改此项后软件会立即退出，请手动重新启动。",
+            dialog,
+        )
+        torch_compile_hint.setObjectName("SectionHint")
+        torch_compile_hint.setWordWrap(True)
+        experimental_layout.addWidget(torch_compile_hint)
         form.addRow("实验选项", experimental_widget)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
@@ -684,6 +700,7 @@ class MainWindow(QMainWindow):
         self._quick_settings_auto_emotion_checkbox = auto_emotion_checkbox
         self._quick_settings_auto_emotion_strength_slider = auto_emotion_strength_slider
         self._quick_settings_auto_emotion_strength_label = auto_emotion_strength_label
+        self._quick_settings_torch_compile_checkbox = torch_compile_checkbox
         apply_window_chrome_theme(dialog, self._current_theme)
         return dialog
 
@@ -696,6 +713,8 @@ class MainWindow(QMainWindow):
             self._quick_settings_auto_emotion_checkbox.setChecked(self._auto_emotion_feature_enabled)
         if self._quick_settings_auto_emotion_strength_slider is not None:
             self._quick_settings_auto_emotion_strength_slider.setValue(int(round(self._auto_emotion_strength / 0.05)))
+        if self._quick_settings_torch_compile_checkbox is not None:
+            self._quick_settings_torch_compile_checkbox.setChecked(self._experimental_torch_compile_enabled)
         self._sync_quick_settings_auto_emotion_controls()
 
         if dialog.exec() != QDialog.Accepted:
@@ -711,6 +730,22 @@ class MainWindow(QMainWindow):
             self._auto_emotion_strength = self._quick_settings_auto_emotion_strength_slider.value() * 0.05
         self._on_auto_emotion_toggled()
         self._refresh_workspace_summary()
+
+        new_torch_compile_enabled = (
+            self._quick_settings_torch_compile_checkbox.isChecked()
+            if self._quick_settings_torch_compile_checkbox is not None
+            else self._experimental_torch_compile_enabled
+        )
+        if new_torch_compile_enabled != self._experimental_torch_compile_enabled:
+            try:
+                set_experimental_torch_compile_enabled(new_torch_compile_enabled)
+            except Exception as exc:
+                logger.exception("保存 Torch Compile 设置失败")
+                self._show_message(QMessageBox.Critical, "保存失败", f"无法保存 Torch Compile 设置：{exc}")
+                return
+            self._experimental_torch_compile_enabled = new_torch_compile_enabled
+            self.settings = get_settings()
+            self._show_torch_compile_restart_notice(new_torch_compile_enabled)
 
     def _standard_icon(self, icon_kind: QStyle.StandardPixmap):
         return self.style().standardIcon(icon_kind)
@@ -732,6 +767,29 @@ class MainWindow(QMainWindow):
         dialog.setInformativeText("")
         apply_window_chrome_theme(dialog, self._current_theme)
         dialog.exec()
+
+    def _show_torch_compile_restart_notice(self, enabled: bool) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("需要重启")
+        dialog.setText(
+            "实验性加速（Torch Compile）设置已更新，软件现在会退出。请重新启动后再使用。"
+        )
+        dialog.setInformativeText(
+            (
+                "当前已启用该实验功能。仅建议在已安装 Visual Studio Build Tools 2022，"
+                "并包含 MSVC C++ x64 编译工具（cl.exe）时使用。若缺少这些组件，程序会自动回退到常规推理。"
+            )
+            if enabled
+            else "当前已关闭该实验功能。重启后会恢复为常规推理路径。"
+        )
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.setModal(True)
+        apply_window_chrome_theme(dialog, self._current_theme)
+        dialog.exec()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     @staticmethod
     def _set_text_if_changed(widget: QLabel | QPushButton, text: str) -> None:

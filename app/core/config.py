@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -19,6 +20,8 @@ DEFAULT_TTS_MAX_NEW_TOKENS = 2048
 MIN_LIVE_IDLE_UNLOAD_SEC = 3600.0
 DEFAULT_LIVE_ASR_IDLE_UNLOAD_SEC = MIN_LIVE_IDLE_UNLOAD_SEC
 DEFAULT_LIVE_TTS_IDLE_UNLOAD_SEC = MIN_LIVE_IDLE_UNLOAD_SEC
+DEFAULT_EXPERIMENTAL_TORCH_COMPILE_ENABLED = False
+RUNTIME_SETTINGS_FILE = BASE_DIR / "settings.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +36,39 @@ class AppSettings:
     tts_max_new_tokens: int
     live_asr_idle_unload_sec: float
     live_tts_idle_unload_sec: float
+    experimental_torch_compile_enabled: bool
+
+
+def _load_runtime_settings() -> dict[str, object]:
+    if not RUNTIME_SETTINGS_FILE.exists():
+        return {}
+    try:
+        with RUNTIME_SETTINGS_FILE.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_runtime_settings(data: dict[str, object]) -> None:
+    RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with RUNTIME_SETTINGS_FILE.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _parse_optional_bool(raw: object) -> bool | None:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return bool(raw)
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def resolve_asr_model_dir() -> Path:
@@ -96,6 +132,24 @@ def resolve_live_tts_idle_unload_sec() -> float:
     )
 
 
+def resolve_experimental_torch_compile_enabled() -> bool:
+    env_value = _parse_optional_bool(os.getenv("EXPERIMENTAL_TORCH_COMPILE"))
+    if env_value is not None:
+        return env_value
+    settings_value = _parse_optional_bool(_load_runtime_settings().get("experimental_torch_compile_enabled"))
+    if settings_value is not None:
+        return settings_value
+    return DEFAULT_EXPERIMENTAL_TORCH_COMPILE_ENABLED
+
+
+def set_experimental_torch_compile_enabled(enabled: bool) -> Path:
+    settings = _load_runtime_settings()
+    settings["experimental_torch_compile_enabled"] = bool(enabled)
+    _save_runtime_settings(settings)
+    get_settings.cache_clear()
+    return RUNTIME_SETTINGS_FILE
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
     return AppSettings(
@@ -109,4 +163,5 @@ def get_settings() -> AppSettings:
         tts_max_new_tokens=resolve_tts_max_new_tokens(),
         live_asr_idle_unload_sec=resolve_live_asr_idle_unload_sec(),
         live_tts_idle_unload_sec=resolve_live_tts_idle_unload_sec(),
+        experimental_torch_compile_enabled=resolve_experimental_torch_compile_enabled(),
     )
