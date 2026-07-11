@@ -20,6 +20,7 @@ env/
 # IDE / editor
 .idea/
 .vscode/
+.vs/
 *.code-workspace
 
 # OS files
