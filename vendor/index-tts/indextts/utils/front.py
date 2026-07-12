@@ -606,7 +606,7 @@ class TextTokenizer:
         "▁?",
         "▁...", # ellipsis
     ]
-    def split_segments(self, tokenized: List[str], max_text_tokens_per_segment=120, quick_streaming_tokens = 0) -> List[List[str]]:
+    def split_segments(self, tokenized: List[str], max_text_tokens_per_segment=80, quick_streaming_tokens = 0) -> List[List[str]]:
         return TextTokenizer.split_segments_by_token(
             tokenized, self.punctuation_marks_tokens, max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
         )

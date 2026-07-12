@@ -427,7 +427,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
+              verbose=False, max_text_tokens_per_segment=80, stream_return=False, more_segment_before=0,
               quick_streaming_tokens=0,
               diffusion_steps=12,
               **generation_kwargs):
@@ -483,7 +483,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
+              verbose=False, max_text_tokens_per_segment=80, stream_return=False, more_segment_before=0,
               **generation_kwargs):
         _ = more_segment_before
         quick_streaming_tokens = generation_kwargs.pop("quick_streaming_tokens", 0)
@@ -538,10 +538,24 @@ class IndexTTS2:
             emo_alpha = 1.0
 
         # 参考音频做多条目真缓存：当前设备热缓存 + CPU 持久缓存
+        reference_feature_start_time = time.perf_counter()
+        reference_cache_state = "device_hot"
+        reference_stage_times = {
+            "cache_restore": 0.0,
+            "load_audio": 0.0,
+            "resample": 0.0,
+            "extract_features": 0.0,
+            "semantic": 0.0,
+            "mel": 0.0,
+            "campplus": 0.0,
+            "length_regulator": 0.0,
+        }
         spk_audio_key = self._build_audio_cache_key(spk_audio_prompt)
         if self.cache_spk_cond is None or self.cache_spk_audio_key != spk_audio_key:
             cached_speaker = self._speaker_feature_cache.get(spk_audio_key)
             if cached_speaker is not None:
+                reference_cache_state = "cpu_cache"
+                stage_start_time = time.perf_counter()
                 self._speaker_feature_cache.move_to_end(spk_audio_key)
                 spk_cond_emb = self._restore_tensor_to_device(cached_speaker["spk_cond_emb"])
                 style = self._restore_tensor_to_device(cached_speaker["style"])
@@ -553,8 +567,9 @@ class IndexTTS2:
                 self.cache_spk_audio_prompt = spk_audio_prompt
                 self.cache_spk_audio_key = spk_audio_key
                 self.cache_mel = ref_mel
-                logger.info("命中参考音频缓存: {}", spk_audio_prompt)
+                reference_stage_times["cache_restore"] = time.perf_counter() - stage_start_time
             else:
+                reference_cache_state = "miss"
                 if self.cache_spk_cond is not None:
                     self.cache_spk_cond = None
                     self.cache_s2mel_style = None
@@ -562,31 +577,48 @@ class IndexTTS2:
                     self.cache_mel = None
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                stage_start_time = time.perf_counter()
                 audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
+                reference_stage_times["load_audio"] = time.perf_counter() - stage_start_time
+
+                stage_start_time = time.perf_counter()
                 audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
                 audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
+                reference_stage_times["resample"] = time.perf_counter() - stage_start_time
 
+                stage_start_time = time.perf_counter()
                 inputs = self.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
                 input_features = inputs["input_features"]
                 attention_mask = inputs["attention_mask"]
                 input_features = input_features.to(self.device)
                 attention_mask = attention_mask.to(self.device)
-                spk_cond_emb = self.get_emb(input_features, attention_mask)
+                reference_stage_times["extract_features"] = time.perf_counter() - stage_start_time
 
+                stage_start_time = time.perf_counter()
+                spk_cond_emb = self.get_emb(input_features, attention_mask)
                 _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
+                reference_stage_times["semantic"] = time.perf_counter() - stage_start_time
+
+                stage_start_time = time.perf_counter()
                 ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
                 ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
+                reference_stage_times["mel"] = time.perf_counter() - stage_start_time
+
+                stage_start_time = time.perf_counter()
                 feat = torchaudio.compliance.kaldi.fbank(audio_16k.float(),
                                                          num_mel_bins=80,
                                                          dither=0,
                                                          sample_frequency=16000)
                 feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
                 style = self._compute_campplus_style(feat.unsqueeze(0)).to(self.device)  # 参考音频的全局style2[1,192]
+                reference_stage_times["campplus"] = time.perf_counter() - stage_start_time
 
+                stage_start_time = time.perf_counter()
                 prompt_condition = self.s2mel.models['length_regulator'](S_ref,
                                                                          ylens=ref_target_lengths,
                                                                          n_quantizers=3,
                                                                          f0=None)[0]
+                reference_stage_times["length_regulator"] = time.perf_counter() - stage_start_time
 
                 self.cache_spk_cond = spk_cond_emb
                 self.cache_s2mel_style = style
@@ -610,6 +642,28 @@ class IndexTTS2:
             prompt_condition = self.cache_s2mel_prompt
             spk_cond_emb = self.cache_spk_cond
             ref_mel = self.cache_mel
+
+        reference_feature_total_time = time.perf_counter() - reference_feature_start_time
+        logger.info(
+            "参考音频特征缓存: state={} prompt={} total={:.2f} 秒 restore={:.2f} 秒",
+            reference_cache_state,
+            spk_audio_prompt,
+            reference_feature_total_time,
+            reference_stage_times["cache_restore"],
+        )
+        if reference_cache_state == "miss":
+            logger.info(
+                "参考音频特征耗时明细: load_audio={:.2f} 秒 resample={:.2f} 秒 "
+                "extract_features={:.2f} 秒 semantic={:.2f} 秒 mel={:.2f} 秒 "
+                "campplus={:.2f} 秒 length_regulator={:.2f} 秒",
+                reference_stage_times["load_audio"],
+                reference_stage_times["resample"],
+                reference_stage_times["extract_features"],
+                reference_stage_times["semantic"],
+                reference_stage_times["mel"],
+                reference_stage_times["campplus"],
+                reference_stage_times["length_regulator"],
+            )
 
         if emo_vector is not None:
             weight_vector = torch.tensor(emo_vector, device=self.device)
@@ -695,6 +749,7 @@ class IndexTTS2:
             logger.debug("每段最大文本 token 数: {}", max_text_tokens_per_segment)
             logger.debug("分段内容:\n{}", "\n".join(str(segment) for segment in segments))
         do_sample = generation_kwargs.pop("do_sample", True)
+        first_segment_do_sample = generation_kwargs.pop("first_segment_do_sample", False)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
         temperature = generation_kwargs.pop("temperature", 0.8)
@@ -712,9 +767,15 @@ class IndexTTS2:
         bigvgan_time = 0
         has_warned = False
         silence = None # for stream_return
+        use_async_vocoder_stream = str(self.device).startswith("cuda") and segments_count > 1
+        vocoder_stream = torch.cuda.Stream(device=torch.device(self.device)) if use_async_vocoder_stream else None
+        pending_vocoder = None
+        if use_async_vocoder_stream:
+            logger.info("BigVGAN 异步 CUDA Stream 已启用: segments={}", segments_count)
         for seg_idx, sent in enumerate(segments):
             self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
                                   f"正在合成语音 {seg_idx + 1}/{segments_count}...")
+            segment_do_sample = first_segment_do_sample if seg_idx == 0 else do_sample
 
             text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
             text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
@@ -724,6 +785,7 @@ class IndexTTS2:
                 # debug tokenizer
                 text_token_syms = self.tokenizer.convert_ids_to_tokens(text_tokens[0].tolist())
                 logger.debug("text_token_syms 是否与当前分段一致: {}", text_token_syms == sent)
+                logger.debug("当前分段采样模式: seg={} do_sample={}", seg_idx + 1, segment_do_sample)
 
             m_start_time = time.perf_counter()
             with torch.inference_mode():
@@ -747,7 +809,7 @@ class IndexTTS2:
                         cond_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_cond_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
-                        do_sample=True,
+                        do_sample=segment_do_sample,
                         top_p=top_p,
                         top_k=top_k,
                         temperature=temperature,
@@ -760,7 +822,9 @@ class IndexTTS2:
                     )
 
                 gpt_gen_time += time.perf_counter() - m_start_time
-                if not has_warned and (codes[:, -1] != self.stop_mel_token).any():
+                raw_code_len = int(codes.shape[-1])
+                has_stop_token = bool((codes == self.stop_mel_token).any().item())
+                if not has_warned and not has_stop_token and raw_code_len >= max_mel_tokens:
                     logger.warning(
                         "生成因超过 `max_mel_tokens` ({}) 而停止。输入文本 token 数: {}。"
                         "建议减小 `max_text_tokens_per_segment` ({}) 或增大 `max_mel_tokens`。",
@@ -833,22 +897,97 @@ class IndexTTS2:
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
 
-                    m_start_time = time.perf_counter()
-                    wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
-                    logger.debug("wav 张量形状: {}", wav.shape)
-                    bigvgan_time += time.perf_counter() - m_start_time
-                    wav = wav.squeeze(1)
+                    if use_async_vocoder_stream:
+                        current_stream = torch.cuda.current_stream(device=text_tokens.device)
+                        bigvgan_start_event = torch.cuda.Event(enable_timing=True)
+                        bigvgan_end_event = torch.cuda.Event(enable_timing=True)
+                        vc_target = vc_target.float()
+                        vc_target.record_stream(vocoder_stream)
+                        with torch.cuda.stream(vocoder_stream):
+                            vocoder_stream.wait_stream(current_stream)
+                            bigvgan_start_event.record(vocoder_stream)
+                            wav = self.bigvgan(vc_target).squeeze().unsqueeze(0)
+                            wav = wav.squeeze(1)
+                            wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
+                            bigvgan_end_event.record(vocoder_stream)
+                        pending_current = {
+                            "wav": wav,
+                            "start_event": bigvgan_start_event,
+                            "end_event": bigvgan_end_event,
+                        }
+                    else:
+                        m_start_time = time.perf_counter()
+                        wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
+                        logger.debug("wav 张量形状: {}", wav.shape)
+                        bigvgan_time += time.perf_counter() - m_start_time
+                        wav = wav.squeeze(1)
+                        wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
+                        pending_current = {
+                            "wav": wav,
+                            "start_event": None,
+                            "end_event": None,
+                        }
 
-                wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
-                if verbose:
-                    logger.debug("wav 形状: {}, 最小值: {}, 最大值: {}", wav.shape, wav.min(), wav.max())
-                # wavs.append(wav[:, :-512])
-                wavs.append(wav.cpu())  # to cpu before saving
-                if stream_return:
-                    yield wav.cpu()
-                    if silence == None:
-                        silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
-                    yield silence
+                if use_async_vocoder_stream and pending_vocoder is None:
+                    pending_current["end_event"].synchronize()
+                    bigvgan_time += pending_current["start_event"].elapsed_time(pending_current["end_event"]) / 1000.0
+                    wav = pending_current["wav"]
+                    logger.debug("wav 张量形状: {}", wav.shape)
+                    if verbose:
+                        logger.debug("wav 形状: {}, 最小值: {}, 最大值: {}", wav.shape, wav.min(), wav.max())
+                    wav_cpu = wav.cpu()
+                    wavs.append(wav_cpu)
+                    if stream_return:
+                        yield wav_cpu
+                        if silence == None:
+                            silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                        yield silence
+                    pending_current = None
+
+                if use_async_vocoder_stream and pending_vocoder is not None:
+                    pending_vocoder["end_event"].synchronize()
+                    bigvgan_time += pending_vocoder["start_event"].elapsed_time(pending_vocoder["end_event"]) / 1000.0
+                    wav = pending_vocoder["wav"]
+                    logger.debug("wav 张量形状: {}", wav.shape)
+                    if verbose:
+                        logger.debug("wav 形状: {}, 最小值: {}, 最大值: {}", wav.shape, wav.min(), wav.max())
+                    wav_cpu = wav.cpu()
+                    wavs.append(wav_cpu)
+                    if stream_return:
+                        yield wav_cpu
+                        if silence == None:
+                            silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                        yield silence
+
+                if use_async_vocoder_stream:
+                    pending_vocoder = pending_current
+                else:
+                    wav = pending_current["wav"]
+                    if verbose:
+                        logger.debug("wav 形状: {}, 最小值: {}, 最大值: {}", wav.shape, wav.min(), wav.max())
+                    wav_cpu = wav.cpu()
+                    wavs.append(wav_cpu)  # to cpu before saving
+                    if stream_return:
+                        yield wav_cpu
+                        if silence == None:
+                            silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                        yield silence
+
+        if use_async_vocoder_stream and pending_vocoder is not None:
+            pending_vocoder["end_event"].synchronize()
+            bigvgan_time += pending_vocoder["start_event"].elapsed_time(pending_vocoder["end_event"]) / 1000.0
+            wav = pending_vocoder["wav"]
+            logger.debug("wav 张量形状: {}", wav.shape)
+            if verbose:
+                logger.debug("wav 形状: {}, 最小值: {}, 最大值: {}", wav.shape, wav.min(), wav.max())
+            wav_cpu = wav.cpu()
+            wavs.append(wav_cpu)
+            if stream_return:
+                yield wav_cpu
+                if silence == None:
+                    silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                yield silence
+
         end_time = time.perf_counter()
 
         self._set_gr_progress(0.9, "正在保存音频...")

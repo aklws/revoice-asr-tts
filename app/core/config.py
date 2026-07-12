@@ -21,6 +21,7 @@ MIN_LIVE_IDLE_UNLOAD_SEC = 3600.0
 DEFAULT_LIVE_ASR_IDLE_UNLOAD_SEC = MIN_LIVE_IDLE_UNLOAD_SEC
 DEFAULT_LIVE_TTS_IDLE_UNLOAD_SEC = MIN_LIVE_IDLE_UNLOAD_SEC
 DEFAULT_EXPERIMENTAL_TORCH_COMPILE_ENABLED = False
+DEFAULT_EXPERIMENTAL_ACCEL_GPT_ENABLED = False
 RUNTIME_SETTINGS_FILE = BASE_DIR / "settings.json"
 
 
@@ -37,6 +38,7 @@ class AppSettings:
     live_asr_idle_unload_sec: float
     live_tts_idle_unload_sec: float
     experimental_torch_compile_enabled: bool
+    experimental_accel_gpt_enabled: bool
 
 
 def _load_runtime_settings() -> dict[str, object]:
@@ -150,6 +152,24 @@ def set_experimental_torch_compile_enabled(enabled: bool) -> Path:
     return RUNTIME_SETTINGS_FILE
 
 
+def resolve_experimental_accel_gpt_enabled() -> bool:
+    env_value = _parse_optional_bool(os.getenv("EXPERIMENTAL_ACCEL_GPT"))
+    if env_value is not None:
+        return env_value
+    settings_value = _parse_optional_bool(_load_runtime_settings().get("experimental_accel_gpt_enabled"))
+    if settings_value is not None:
+        return settings_value
+    return DEFAULT_EXPERIMENTAL_ACCEL_GPT_ENABLED
+
+
+def set_experimental_accel_gpt_enabled(enabled: bool) -> Path:
+    settings = _load_runtime_settings()
+    settings["experimental_accel_gpt_enabled"] = bool(enabled)
+    _save_runtime_settings(settings)
+    get_settings.cache_clear()
+    return RUNTIME_SETTINGS_FILE
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
     return AppSettings(
@@ -164,4 +184,5 @@ def get_settings() -> AppSettings:
         live_asr_idle_unload_sec=resolve_live_asr_idle_unload_sec(),
         live_tts_idle_unload_sec=resolve_live_tts_idle_unload_sec(),
         experimental_torch_compile_enabled=resolve_experimental_torch_compile_enabled(),
+        experimental_accel_gpt_enabled=resolve_experimental_accel_gpt_enabled(),
     )

@@ -21,6 +21,7 @@ from app.core.runtime import release_memory
 from app.core.audio import resample_waveform
 
 logger = get_logger(__name__)
+_FIRST_CHUNK_WARMUP_TEXT = "你好，欢迎使用。"
 
 
 def _sanitize_text(text: str) -> str:
@@ -192,6 +193,7 @@ class IndexTTSService:
         self.model_dir = model_dir or DEFAULT_INDEX_TTS_MODEL_DIR
         self.device = resolve_tts_device()
         self._use_torch_compile = get_settings().experimental_torch_compile_enabled
+        self._use_accel_gpt = get_settings().experimental_accel_gpt_enabled
         self._tts: Any = None
         self._model_dir_str = str(self.model_dir)
         self._lock = threading.RLock()
@@ -218,21 +220,24 @@ class IndexTTSService:
             if not config_path.exists():
                 raise FileNotFoundError(f"IndexTTS-2 config not found: {config_path}")
 
-            use_accel = False
-            logger.info("IndexTTS Accel GPT 已主动关闭，以降低显存占用。")
+            use_accel = self._use_accel_gpt
+            if use_accel:
+                logger.info("实验性极速模式已启用，将尝试使用更快的语音生成路径。")
+            else:
+                logger.info("实验性极速模式未启用，使用常规推理路径。")
 
             use_torch_compile = self._use_torch_compile
             if use_torch_compile:
                 compiler_available, compiler_desc = _configure_c_compiler()
                 if compiler_available:
-                    logger.info("实验性 Torch Compile 已启用，检测到可用 C 编译器: {}", compiler_desc)
+                    logger.info("实验性进阶模式已启用，检测到可用运行环境: {}", compiler_desc)
                 else:
                     logger.warning(
-                        "实验性 Torch Compile 已开启，但未检测到可用 MSVC/C 编译器环境，已回退到常规推理。"
+                        "实验性进阶模式已开启，但当前环境暂不满足要求，已回退到常规推理。"
                     )
                     use_torch_compile = False
             else:
-                logger.info("实验性 Torch Compile 未启用，使用常规推理路径。")
+                logger.info("实验性进阶模式未启用，使用常规推理路径。")
 
             logger.info("正在加载 IndexTTS-2 模型 (设备={})", self.device)
             index_tts_cls = _load_indextts2_class()
@@ -248,14 +253,14 @@ class IndexTTSService:
             logger.info("IndexTTS-2 加载完成")
 
     def warmup_speaker(self, reference_audio_path: str, emo_vector: list[float] | None = None) -> None:
-        """预热并缓存说话人参考音频的特征，避免首次推理时产生 2~3 秒延迟。"""
+        """后台预热参考音色与首段生成链，降低首次出声延迟。"""
         try:
             with self._use_tts(required=False) as tts:
                 if tts is None:
                     return
                 logger.info("正在预热 TTS 参考音频特征: {}", reference_audio_path)
                 try:
-                    # 调用一次空文本推理来强制 TTS 提取并缓存特征
+                    # 先做一次极短文本推理，强制缓存参考音色特征。
                     gen = tts.infer(
                         spk_audio_prompt=reference_audio_path,
                         text=".",
@@ -266,9 +271,37 @@ class IndexTTSService:
                     )
                     for _ in gen:
                         pass
-                    logger.info("TTS 参考音频特征预热完成")
+                    logger.info("TTS 参考音色特征预热完成")
                 except Exception as e:
                     logger.warning("TTS 参考音频预热失败: {}", e)
+
+                logger.info("正在预热 TTS 首段生成链路: {}", _FIRST_CHUNK_WARMUP_TEXT)
+                warmup_stream = None
+                try:
+                    warmup_stream = tts.infer(
+                        spk_audio_prompt=reference_audio_path,
+                        text=_FIRST_CHUNK_WARMUP_TEXT,
+                        output_path="",
+                        verbose=False,
+                        emo_vector=emo_vector,
+                        stream_return=True,
+                        max_text_tokens_per_segment=80,
+                        quick_streaming_tokens=80,
+                    )
+                    for item in warmup_stream:
+                        if item is None:
+                            break
+                        if isinstance(item, tuple):
+                            break
+                        logger.info("TTS 首段生成链路预热完成")
+                        break
+                except Exception as e:
+                    logger.warning("TTS 首段生成链路预热失败: {}", e)
+                finally:
+                    if warmup_stream is not None:
+                        close_fn = getattr(warmup_stream, "close", None)
+                        if callable(close_fn):
+                            close_fn()
         finally:
             release_memory()
 
@@ -380,7 +413,7 @@ class IndexTTSService:
                     verbose=False,
                     emo_vector=emo_vector,
                     emo_alpha=emo_alpha,
-                    max_text_tokens_per_segment=120,
+                    max_text_tokens_per_segment=80,
                 )
 
             # V2 infer returns (sampling_rate, wav_data) or output_path
@@ -441,7 +474,8 @@ class IndexTTSService:
                         emo_vector=emo_vector,
                         emo_alpha=emo_alpha,
                         stream_return=True,
-                        max_text_tokens_per_segment=120,
+                        max_text_tokens_per_segment=80,
+                        quick_streaming_tokens=80,
                     )
 
                     for item in gen:

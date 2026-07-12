@@ -516,7 +516,7 @@ class IndexTTS:
             return (sampling_rate, wav_data)
 
     # 原始推理模式
-    def infer(self, audio_prompt, text, output_path, verbose=False, max_text_tokens_per_segment=120,
+    def infer(self, audio_prompt, text, output_path, verbose=False, max_text_tokens_per_segment=80,
               **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")

@@ -1,6 +1,6 @@
 [project]
 name = "revoice-asr-tts"
-version = "0.0.4"
+version = "0.0.5"
 description = "Real-time Voice Assistant powered by Qwen3 ASR and IndexTTS-2"
 readme = "README.md"
 requires-python = "==3.13.12"
