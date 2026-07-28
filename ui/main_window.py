@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import sounddevice as sd
@@ -35,6 +36,11 @@ from PySide6.QtWidgets import (
 from app import get_settings
 from app.core.config import (
     DEFAULT_TTS_MAX_NEW_TOKENS,
+    set_output_voice_language,
+    set_supported_index_tts_model_repos,
+    set_translation_enabled,
+    set_translation_node_id,
+    set_translation_nodes,
     set_experimental_accel_gpt_enabled,
     set_experimental_torch_compile_enabled,
 )
@@ -48,7 +54,7 @@ from ui.workers import LiveSpeechWorker, LiveWorkerState
 
 
 logger = get_logger(__name__)
-APP_VERSION = "v0.0.5"
+APP_VERSION = "v0.0.6"
 APP_DISPLAY_NAME = f"Revoice ASR-TTS {APP_VERSION}"
 SETTINGS_ICON_PATH = get_bundle_file("ui", "assets", "settings_gear.svg")
 EMOTION_PRESETS: tuple[tuple[str, str | None], ...] = (
@@ -65,6 +71,15 @@ INPUT_MODES: tuple[tuple[str, str], ...] = (
 )
 TTS_ENGINES: tuple[tuple[str, str], ...] = (
     ("Index-TTS", "indextts"),
+)
+OUTPUT_LANGUAGE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("中文", "zh"),
+    ("英文", "en"),
+    ("日语", "ja"),
+)
+TTS_MODEL_PRELOAD_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("中英基础模型", "IndexTeam/IndexTTS-2"),
+    ("日语模型", "xmccln/IndexTTS-2-Japanese"),
 )
 # Index-TTS 八情感: [高兴, 愤怒, 悲伤, 恐惧, 反感, 低落, 惊讶, 自然]
 INDEX_TTS_EMOTIONS: tuple[tuple[str, str], ...] = (
@@ -130,6 +145,10 @@ class MainWindow(QMainWindow):
         self._quick_settings_auto_emotion_checkbox: QCheckBox | None = None
         self._quick_settings_auto_emotion_strength_slider: QSlider | None = None
         self._quick_settings_auto_emotion_strength_label: QLabel | None = None
+        self._quick_settings_output_language_combo: QComboBox | None = None
+        self._quick_settings_tts_preload_checkboxes: dict[str, QCheckBox] = {}
+        self._quick_settings_translation_enabled_checkbox: QCheckBox | None = None
+        self._quick_settings_translation_node_combo: QComboBox | None = None
         self._quick_settings_torch_compile_checkbox: QCheckBox | None = None
         self._quick_settings_accel_gpt_checkbox: QCheckBox | None = None
         self._reference_audio_dialog: QFileDialog | None = None
@@ -137,6 +156,9 @@ class MainWindow(QMainWindow):
         self._manual_index_emo_snapshot: dict[str, object] | None = None
         self._auto_emotion_feature_enabled = False
         self._auto_emotion_strength = 0.75
+        self._output_voice_language = self.settings.output_voice_language
+        self._translation_enabled = self.settings.translation_enabled
+        self._translation_node_id = self.settings.translation_node_id
         self._experimental_torch_compile_enabled = self.settings.experimental_torch_compile_enabled
         self._experimental_accel_gpt_enabled = self.settings.experimental_accel_gpt_enabled
 
@@ -224,6 +246,7 @@ class MainWindow(QMainWindow):
         status_row.setSpacing(8)
         self.header_mode_value = self._create_summary_card(status_row, "当前模式")
         self.header_runtime_value = self._create_summary_card(status_row, "引擎状态")
+        self.header_tts_model_value = self._create_summary_card(status_row, "输出语言")
         self.header_auto_emotion_value = self._create_summary_card(status_row, "情感识别")
         self.header_reference_value = self._create_summary_card(status_row, "参考音色")
         header_auto_emotion_card = self.header_auto_emotion_value.parentWidget()
@@ -562,6 +585,9 @@ class MainWindow(QMainWindow):
         reference_row = QHBoxLayout()
         reference_row.setSpacing(8)
         reference_row.addWidget(self.live_reference_audio_edit, stretch=1)
+        self.tts_model_badge = QLabel("中文")
+        self.tts_model_badge.setObjectName("StatusBadge")
+        reference_row.addWidget(self.tts_model_badge)
         self.reference_ready_badge = QLabel("待选择")
         self.reference_ready_badge.setObjectName("StatusBadge")
         reference_row.addWidget(self.reference_ready_badge)
@@ -639,6 +665,28 @@ class MainWindow(QMainWindow):
         self._refresh_workspace_text_metrics()
         return card
 
+    @staticmethod
+    def _format_output_language_label(language: str) -> str:
+        if language == "zh":
+            return "中文"
+        if language == "en":
+            return "英文"
+        if language == "ja":
+            return "日语"
+        return "其他"
+
+    @staticmethod
+    def _infer_output_language_state(language: str) -> str:
+        if language in {"zh", "en"}:
+            return "official"
+        if language == "ja":
+            return "japanese"
+        return "custom"
+
+    @staticmethod
+    def _known_output_languages() -> tuple[str, ...]:
+        return tuple(code for _label, code in OUTPUT_LANGUAGE_OPTIONS)
+
     def _ensure_quick_settings_dialog(self) -> QDialog:
         if self._quick_settings_dialog is not None:
             return self._quick_settings_dialog
@@ -646,7 +694,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("快速设置")
         dialog.setModal(True)
-        dialog.resize(420, 300)
+        dialog.resize(520, 430)
 
         form = QFormLayout(dialog)
         form.setSpacing(12)
@@ -656,6 +704,66 @@ class MainWindow(QMainWindow):
             input_mode_combo.addItem(label, value)
         input_mode_combo.currentIndexChanged.connect(self._sync_quick_settings_auto_emotion_controls)
         form.addRow("输入方式", input_mode_combo)
+
+        output_language_combo = QComboBox(dialog)
+        for label, language_code in OUTPUT_LANGUAGE_OPTIONS:
+            output_language_combo.addItem(label, language_code)
+        form.addRow("当前输出语言", output_language_combo)
+
+        tts_preload_widget = QWidget(dialog)
+        tts_preload_layout = QVBoxLayout(tts_preload_widget)
+        tts_preload_layout.setContentsMargins(0, 0, 0, 0)
+        tts_preload_layout.setSpacing(6)
+        tts_preload_checkboxes: dict[str, QCheckBox] = {}
+        for label, repo in TTS_MODEL_PRELOAD_OPTIONS:
+            checkbox = QCheckBox(label, dialog)
+            tts_preload_layout.addWidget(checkbox)
+            tts_preload_checkboxes[repo] = checkbox
+        tts_preload_hint = QLabel(
+            "勾选后，程序会在启动时自动检查并下载这些输出语言对应的模型。"
+            "只有在切到日语，或者修改预下载模型清单时，才需要重启。",
+            dialog,
+        )
+        tts_preload_hint.setObjectName("SectionHint")
+        tts_preload_hint.setWordWrap(True)
+        tts_preload_layout.addWidget(tts_preload_hint)
+        form.addRow("启动预下载语言", tts_preload_widget)
+
+        translation_widget = QWidget(dialog)
+        translation_layout = QVBoxLayout(translation_widget)
+        translation_layout.setContentsMargins(0, 0, 0, 0)
+        translation_layout.setSpacing(8)
+
+        translation_enabled_checkbox = QCheckBox("将输入文本自动翻译为输出语言", dialog)
+        translation_layout.addWidget(translation_enabled_checkbox)
+
+        translation_node_combo = QComboBox(dialog)
+        translation_layout.addWidget(translation_node_combo)
+
+        translation_buttons_row = QHBoxLayout()
+        translation_buttons_row.setContentsMargins(0, 0, 0, 0)
+        translation_buttons_row.setSpacing(6)
+        add_openai_button = QPushButton("添加 OpenAI", dialog)
+        add_deepseek_button = QPushButton("添加 DeepSeek", dialog)
+        add_custom_button = QPushButton("添加自定义", dialog)
+        edit_translation_button = QPushButton("编辑节点", dialog)
+        remove_translation_button = QPushButton("删除节点", dialog)
+        translation_buttons_row.addWidget(add_openai_button)
+        translation_buttons_row.addWidget(add_deepseek_button)
+        translation_buttons_row.addWidget(add_custom_button)
+        translation_buttons_row.addWidget(edit_translation_button)
+        translation_buttons_row.addWidget(remove_translation_button)
+        translation_layout.addLayout(translation_buttons_row)
+
+        translation_hint = QLabel(
+            "翻译节点使用 OpenAI 兼容接口。可以添加 OpenAI、DeepSeek 或其他兼容节点。"
+            "启用后，程序会在送入 TTS 之前，先把文本翻译成当前输出语言。",
+            dialog,
+        )
+        translation_hint.setObjectName("SectionHint")
+        translation_hint.setWordWrap(True)
+        translation_layout.addWidget(translation_hint)
+        form.addRow("翻译节点", translation_widget)
 
         experimental_widget = QWidget(dialog)
         experimental_layout = QVBoxLayout(experimental_widget)
@@ -720,8 +828,17 @@ class MainWindow(QMainWindow):
         self._quick_settings_auto_emotion_checkbox = auto_emotion_checkbox
         self._quick_settings_auto_emotion_strength_slider = auto_emotion_strength_slider
         self._quick_settings_auto_emotion_strength_label = auto_emotion_strength_label
+        self._quick_settings_output_language_combo = output_language_combo
+        self._quick_settings_tts_preload_checkboxes = tts_preload_checkboxes
+        self._quick_settings_translation_enabled_checkbox = translation_enabled_checkbox
+        self._quick_settings_translation_node_combo = translation_node_combo
         self._quick_settings_torch_compile_checkbox = torch_compile_checkbox
         self._quick_settings_accel_gpt_checkbox = accel_gpt_checkbox
+        add_openai_button.clicked.connect(lambda: self._add_translation_node_preset("openai"))
+        add_deepseek_button.clicked.connect(lambda: self._add_translation_node_preset("deepseek"))
+        add_custom_button.clicked.connect(lambda: self._add_translation_node_preset("custom"))
+        edit_translation_button.clicked.connect(self._edit_selected_translation_node)
+        remove_translation_button.clicked.connect(self._remove_selected_translation_node)
         apply_window_chrome_theme(dialog, self._current_theme)
         return dialog
 
@@ -734,6 +851,15 @@ class MainWindow(QMainWindow):
             self._quick_settings_auto_emotion_checkbox.setChecked(self._auto_emotion_feature_enabled)
         if self._quick_settings_auto_emotion_strength_slider is not None:
             self._quick_settings_auto_emotion_strength_slider.setValue(int(round(self._auto_emotion_strength / 0.05)))
+        if self._quick_settings_output_language_combo is not None:
+            combo_index = self._quick_settings_output_language_combo.findData(self._output_voice_language)
+            if combo_index >= 0:
+                self._quick_settings_output_language_combo.setCurrentIndex(combo_index)
+        for repo, checkbox in self._quick_settings_tts_preload_checkboxes.items():
+            checkbox.setChecked(repo in self.settings.supported_index_tts_model_repos)
+        if self._quick_settings_translation_enabled_checkbox is not None:
+            self._quick_settings_translation_enabled_checkbox.setChecked(self._translation_enabled)
+        self._refresh_translation_node_combo()
         if self._quick_settings_torch_compile_checkbox is not None:
             self._quick_settings_torch_compile_checkbox.setChecked(self._experimental_torch_compile_enabled)
         if self._quick_settings_accel_gpt_checkbox is not None:
@@ -754,12 +880,98 @@ class MainWindow(QMainWindow):
         self._on_auto_emotion_toggled()
         self._refresh_workspace_summary()
 
+        new_output_language = (
+            str(self._quick_settings_output_language_combo.currentData() or "").strip()
+            if self._quick_settings_output_language_combo is not None
+            else self._output_voice_language
+        )
+        selected_preload_repos = [
+            repo
+            for repo, checkbox in self._quick_settings_tts_preload_checkboxes.items()
+            if checkbox.isChecked()
+        ]
+        known_repo_set = {repo for _label, repo in TTS_MODEL_PRELOAD_OPTIONS}
+        preserved_custom_repos = [
+            repo
+            for repo in self.settings.supported_index_tts_model_repos
+            if repo not in known_repo_set
+        ]
+        new_supported_tts_repos = [*selected_preload_repos, *preserved_custom_repos]
+        target_repo = "xmccln/IndexTTS-2-Japanese" if new_output_language == "ja" else "IndexTeam/IndexTTS-2"
+        if target_repo not in new_supported_tts_repos:
+            new_supported_tts_repos.insert(0, target_repo)
+
+        new_translation_enabled = (
+            self._quick_settings_translation_enabled_checkbox.isChecked()
+            if self._quick_settings_translation_enabled_checkbox is not None
+            else self._translation_enabled
+        )
+        new_translation_node_id = (
+            str(self._quick_settings_translation_node_combo.currentData() or "").strip()
+            if self._quick_settings_translation_node_combo is not None
+            else (self._translation_node_id or "")
+        ) or None
+
         new_torch_compile_enabled = (
             self._quick_settings_torch_compile_checkbox.isChecked()
             if self._quick_settings_torch_compile_checkbox is not None
             else self._experimental_torch_compile_enabled
         )
         changed_features: list[str] = []
+        restart_reasons: list[str] = []
+        output_language_changed = False
+
+        if new_output_language not in self._known_output_languages():
+            self._show_message(QMessageBox.Warning, "保存失败", "当前输出语言无效。")
+            return
+        if not new_supported_tts_repos:
+            self._show_message(QMessageBox.Warning, "保存失败", "请至少勾选一个需要预下载的输出语言。")
+            return
+        if new_translation_enabled and not new_translation_node_id:
+            self._show_message(QMessageBox.Warning, "保存失败", "启用翻译前，请先添加并选择一个翻译节点。")
+            return
+
+        if new_supported_tts_repos != list(self.settings.supported_index_tts_model_repos):
+            try:
+                set_supported_index_tts_model_repos(new_supported_tts_repos)
+            except Exception as exc:
+                logger.exception("保存 TTS 模型清单失败")
+                self._show_message(QMessageBox.Critical, "保存失败", f"无法保存语言模型清单：{exc}")
+                return
+            restart_reasons.append("启动预下载语言模型")
+
+        if new_output_language != self._output_voice_language:
+            try:
+                set_output_voice_language(new_output_language)
+            except Exception as exc:
+                logger.exception("保存当前 TTS 模型失败")
+                self._show_message(QMessageBox.Critical, "保存失败", f"无法保存当前输出语言：{exc}")
+                return
+            self._output_voice_language = new_output_language
+            output_language_changed = True
+            if target_repo != self.settings.index_tts_model_repo:
+                restart_reasons.append("当前输出语言")
+
+        if new_translation_enabled != self._translation_enabled:
+            try:
+                set_translation_enabled(new_translation_enabled)
+            except Exception as exc:
+                logger.exception("保存翻译开关失败")
+                self._show_message(QMessageBox.Critical, "保存失败", f"无法保存翻译开关：{exc}")
+                return
+            self._translation_enabled = new_translation_enabled
+
+        if new_translation_node_id != self._translation_node_id:
+            try:
+                set_translation_node_id(new_translation_node_id)
+            except Exception as exc:
+                logger.exception("保存翻译节点失败")
+                self._show_message(QMessageBox.Critical, "保存失败", f"无法保存翻译节点：{exc}")
+                return
+            self._translation_node_id = new_translation_node_id
+
+        if restart_reasons:
+            self.settings = get_settings()
 
         if new_torch_compile_enabled != self._experimental_torch_compile_enabled:
             try:
@@ -788,9 +1000,25 @@ class MainWindow(QMainWindow):
 
         if changed_features:
             self.settings = get_settings()
+            self._refresh_workspace_summary()
+            if output_language_changed:
+                self._stop_live_microphone_for_settings_refresh("输出语言已更新，正在自动关闭麦克风以刷新设置...")
             self._show_experimental_restart_notice(
                 feature_names=changed_features,
             )
+            return
+
+        if restart_reasons:
+            self.settings = get_settings()
+            if output_language_changed:
+                self._stop_live_microphone_for_settings_refresh("输出语言已更新，正在自动关闭麦克风以刷新设置...")
+            self._show_model_restart_notice(restart_reasons)
+            return
+
+        self.settings = get_settings()
+        self._refresh_workspace_summary()
+        if output_language_changed:
+            self._stop_live_microphone_for_settings_refresh("输出语言已更新，正在自动关闭麦克风以刷新设置...")
 
     def _standard_icon(self, icon_kind: QStyle.StandardPixmap):
         return self.style().standardIcon(icon_kind)
@@ -819,10 +1047,27 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("需要重启")
         feature_summary = "、".join(feature_names)
         dialog.setText(
-            f"实验性加速（{feature_summary}）设置已更新，软件现在会退出。请重新启动后再使用。"
+            f"实验选项（{feature_summary}）已更新，软件现在会退出。请重新启动后再使用。"
         )
         dialog.setInformativeText(
             self._build_experimental_restart_detail(feature_names)
+        )
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.setModal(True)
+        apply_window_chrome_theme(dialog, self._current_theme)
+        dialog.exec()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _show_model_restart_notice(self, reasons: list[str]) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("需要重启")
+        reason_summary = "、".join(reasons)
+        dialog.setText(f"输出语言设置（{reason_summary}）已更新，软件现在会退出。请重新启动后继续使用。")
+        dialog.setInformativeText(
+            "下次启动时，程序会按新的输出语言与语言模型清单重新检查并自动下载所需模型。"
         )
         dialog.setStandardButtons(QMessageBox.Ok)
         dialog.setModal(True)
@@ -846,6 +1091,198 @@ class MainWindow(QMainWindow):
         if not detail_parts:
             return "实验设置已更新，重启后将按新的配置运行。"
         return " ".join(detail_parts)
+
+    @staticmethod
+    def _translation_node_label(node) -> str:
+        provider = getattr(node, "provider", "openai-compatible")
+        return f"{node.name} ({provider} / {node.model})"
+
+    def _refresh_translation_node_combo(self) -> None:
+        combo = self._quick_settings_translation_node_combo
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("不使用翻译节点", "")
+        for node in self.settings.translation_nodes:
+            combo.addItem(self._translation_node_label(node), node.node_id)
+        selected_id = self._translation_node_id or ""
+        index = combo.findData(selected_id)
+        if index < 0:
+            index = 0
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    @staticmethod
+    def _preset_translation_node_values(provider: str) -> dict[str, str]:
+        if provider == "openai":
+            return {
+                "provider": "openai",
+                "name": "OpenAI",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+                "api_key": "",
+            }
+        if provider == "deepseek":
+            return {
+                "provider": "deepseek",
+                "name": "DeepSeek",
+                "base_url": "https://api.deepseek.com/v1",
+                "model": "deepseek-chat",
+                "api_key": "",
+            }
+        return {
+            "provider": "openai-compatible",
+            "name": "自定义节点",
+            "base_url": "https://your-endpoint.example.com/v1",
+            "model": "",
+            "api_key": "",
+        }
+
+    def _open_translation_node_editor(self, *, provider: str, existing_node=None) -> dict[str, str] | None:
+        defaults = self._preset_translation_node_values(provider)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("翻译节点")
+        dialog.setModal(True)
+        form = QFormLayout(dialog)
+        form.setSpacing(10)
+
+        name_edit = QLineEdit(dialog)
+        base_url_edit = QLineEdit(dialog)
+        model_edit = QLineEdit(dialog)
+        api_key_edit = QLineEdit(dialog)
+        api_key_edit.setEchoMode(QLineEdit.Password)
+
+        if existing_node is not None:
+            name_edit.setText(existing_node.name)
+            base_url_edit.setText(existing_node.base_url)
+            model_edit.setText(existing_node.model)
+            api_key_edit.setText(existing_node.api_key)
+            provider_value = existing_node.provider
+        else:
+            name_edit.setText(defaults["name"])
+            base_url_edit.setText(defaults["base_url"])
+            model_edit.setText(defaults["model"])
+            api_key_edit.setText(defaults["api_key"])
+            provider_value = defaults["provider"]
+
+        form.addRow("节点名称", name_edit)
+        form.addRow("Base URL", base_url_edit)
+        form.addRow("模型名", model_edit)
+        form.addRow("API Key", api_key_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        apply_window_chrome_theme(dialog, self._current_theme)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        name = name_edit.text().strip()
+        base_url = base_url_edit.text().strip()
+        model = model_edit.text().strip()
+        api_key = api_key_edit.text().strip()
+        if not name or not base_url or not model:
+            self._show_message(QMessageBox.Warning, "保存失败", "节点名称、Base URL 和模型名不能为空。")
+            return None
+        return {
+            "node_id": getattr(existing_node, "node_id", uuid4().hex),
+            "name": name,
+            "provider": provider_value,
+            "base_url": base_url,
+            "model": model,
+            "api_key": api_key,
+        }
+
+    def _save_translation_nodes_from_dicts(self, nodes: list[dict[str, object]], *, selected_node_id: str | None = None) -> None:
+        set_translation_nodes(nodes)
+        if selected_node_id is not None:
+            set_translation_node_id(selected_node_id)
+            self._translation_node_id = selected_node_id
+        self.settings = get_settings()
+        if self._translation_node_id and all(node.node_id != self._translation_node_id for node in self.settings.translation_nodes):
+            self._translation_node_id = None
+        self._refresh_translation_node_combo()
+
+    def _add_translation_node_preset(self, provider: str) -> None:
+        node_payload = self._open_translation_node_editor(provider=provider)
+        if node_payload is None:
+            return
+        existing_nodes = [
+            {
+                "node_id": node.node_id,
+                "name": node.name,
+                "provider": node.provider,
+                "base_url": node.base_url,
+                "model": node.model,
+                "api_key": node.api_key,
+            }
+            for node in self.settings.translation_nodes
+        ]
+        existing_nodes.append(node_payload)
+        self._save_translation_nodes_from_dicts(existing_nodes, selected_node_id=str(node_payload["node_id"]))
+
+    def _edit_selected_translation_node(self) -> None:
+        selected_id = (
+            str(self._quick_settings_translation_node_combo.currentData() or "").strip()
+            if self._quick_settings_translation_node_combo is not None
+            else ""
+        )
+        if not selected_id:
+            self._show_message(QMessageBox.Information, "暂无节点", "请先选择一个翻译节点。")
+            return
+        existing_node = next((node for node in self.settings.translation_nodes if node.node_id == selected_id), None)
+        if existing_node is None:
+            self._show_message(QMessageBox.Warning, "节点不存在", "当前翻译节点已不存在，请重新选择。")
+            self._translation_node_id = None
+            self._refresh_translation_node_combo()
+            return
+        node_payload = self._open_translation_node_editor(provider=existing_node.provider, existing_node=existing_node)
+        if node_payload is None:
+            return
+        updated_nodes = []
+        for node in self.settings.translation_nodes:
+            if node.node_id == selected_id:
+                updated_nodes.append(node_payload)
+            else:
+                updated_nodes.append(
+                    {
+                        "node_id": node.node_id,
+                        "name": node.name,
+                        "provider": node.provider,
+                        "base_url": node.base_url,
+                        "model": node.model,
+                        "api_key": node.api_key,
+                    }
+                )
+        self._save_translation_nodes_from_dicts(updated_nodes, selected_node_id=selected_id)
+
+    def _remove_selected_translation_node(self) -> None:
+        selected_id = (
+            str(self._quick_settings_translation_node_combo.currentData() or "").strip()
+            if self._quick_settings_translation_node_combo is not None
+            else ""
+        )
+        if not selected_id:
+            self._show_message(QMessageBox.Information, "暂无节点", "当前没有可删除的翻译节点。")
+            return
+        remaining_nodes = [
+            {
+                "node_id": node.node_id,
+                "name": node.name,
+                "provider": node.provider,
+                "base_url": node.base_url,
+                "model": node.model,
+                "api_key": node.api_key,
+            }
+            for node in self.settings.translation_nodes
+            if node.node_id != selected_id
+        ]
+        next_selected = remaining_nodes[0]["node_id"] if remaining_nodes else None
+        self._save_translation_nodes_from_dicts(remaining_nodes, selected_node_id=next_selected)
+        if not remaining_nodes and self._quick_settings_translation_enabled_checkbox is not None:
+            self._quick_settings_translation_enabled_checkbox.setChecked(False)
 
     @staticmethod
     def _set_text_if_changed(widget: QLabel | QPushButton, text: str) -> None:
@@ -1487,7 +1924,10 @@ class MainWindow(QMainWindow):
                 "input_mode": input_mode,
                 "input_text": input_text,
                 "reference_audio_path": reference_audio,
-                "language": "Chinese",
+                "language": "auto",
+                "output_language": self._output_voice_language,
+                "translation_enabled": self._translation_enabled,
+                "translation_node_id": self._translation_node_id,
                 "instruction": self._build_tts_instruction(),
                 "max_new_tokens": DEFAULT_TTS_MAX_NEW_TOKENS,
                 "input_device": self.input_device_combo.currentData(),
@@ -1643,6 +2083,16 @@ class MainWindow(QMainWindow):
             LiveWorkerState.STOPPING.value,
         }
 
+    def _stop_live_microphone_for_settings_refresh(self, status_text: str) -> None:
+        if self._current_input_mode() != "microphone":
+            return
+        if self._live_worker_state == LiveWorkerState.RUNNING.value:
+            self.live_start_button.setEnabled(False)
+            self._set_text_if_changed(self.live_start_button, "正在停止...")
+            self.live_start_button.setIcon(self._standard_icon(QStyle.SP_BrowserReload))
+            self._set_live_status(status_text, "busy")
+            self.live_stop_requested.emit()
+
     def _refresh_live_start_button(self) -> None:
         input_mode = self._current_input_mode()
         if self._live_worker_state == LiveWorkerState.STOPPING.value:
@@ -1679,16 +2129,30 @@ class MainWindow(QMainWindow):
         reference_name = Path(reference_path).name if reference_path else "未选择"
         output_label = self.output_device_combo.currentText().strip() or "系统默认输出"
         runtime_text = status_override or self.live_status_label.text().strip() or "待命中"
+        output_language = self.settings.output_voice_language
+        tts_model_label = self._format_output_language_label(output_language)
+        tts_model_state = self._infer_output_language_state(output_language)
+        supported_count = len(self.settings.supported_index_tts_model_repos)
 
         self._set_text_if_changed(self.header_mode_value, input_mode)
         self._set_text_if_changed(self.header_runtime_value, runtime_text)
+        self._set_text_if_changed(self.header_tts_model_value, tts_model_label)
+        self._set_widget_state(self.header_tts_model_value, tts_model_state)
+        self.header_tts_model_value.setToolTip(output_language)
         self._set_text_if_changed(self.header_reference_value, reference_name)
         if hasattr(self, "reference_meta_label"):
             self._set_text_if_changed(
                 self.reference_meta_label,
-                f"当前参考：{reference_name} | 播放：{output_label} | 耳返："
-                f"{self.monitor_output_device_combo.currentText().strip() or '关闭耳返'}"
+                f"输出语言：{tts_model_label} | 当前参考：{reference_name} | 播放：{output_label} | 耳返："
+                f"{self.monitor_output_device_combo.currentText().strip() or '关闭耳返'} | 启动预下载：{supported_count} 个语言模型"
             )
+        if hasattr(self, "tts_model_badge"):
+            badge_text = tts_model_label
+            if supported_count > 1:
+                badge_text = f"{tts_model_label} | 已预载 {supported_count} 个语言"
+            self._set_text_if_changed(self.tts_model_badge, badge_text)
+            self._set_widget_state(self.tts_model_badge, tts_model_state)
+            self.tts_model_badge.setToolTip(output_language)
         if hasattr(self, "reference_ready_badge"):
             if not reference_path:
                 badge_text = "待选择"
@@ -1716,3 +2180,10 @@ class MainWindow(QMainWindow):
         style.unpolish(widget)
         style.polish(widget)
         widget.update()
+
+    @classmethod
+    def _set_widget_state(cls, widget: QWidget, state: str) -> None:
+        if widget.property("state") == state:
+            return
+        widget.setProperty("state", state)
+        cls._refresh_widget_style(widget)

@@ -1,28 +1,37 @@
+﻿param(
+    [string]$AppVersion = "0.0.6",
+    [switch]$NoUpx,
+    [switch]$IncludeBundledFfmpeg,
+    [switch]$DryRun
+)
+
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+$venvDir = Join-Path $repoRoot ".venv"
+$venvPython = Join-Path $venvDir "Scripts\python.exe"
+$helperScript = Join-Path $scriptDir "build_cython_bundle.py"
 $entryScript = Join-Path $repoRoot "main.py"
-$appVersion = "0.0.5"
-$fileVersion = "0.0.5.0"
 $packageName = "Revoice-ASR-TTS-v$appVersion"
+$launcherName = "Launch-Revoice-ASR-TTS.bat"
 $distRoot = Join-Path $repoRoot "dist"
 $packageDir = Join-Path $distRoot $packageName
-$buildRoot = Join-Path $repoRoot "build\pyinstaller"
-$specRoot = Join-Path $buildRoot "spec"
-$workRoot = Join-Path $buildRoot "work"
-$versionFile = Join-Path $buildRoot "version_info.txt"
+$buildRoot = Join-Path $repoRoot "build\cython_bundle"
+$compiledRoot = Join-Path $buildRoot "compiled"
+$compiledBuildRoot = Join-Path $buildRoot "cython_build"
 $appIcon = Join-Path $repoRoot "ui\assets\revoice_asr_tts.ico"
 $appIconPng = Join-Path $repoRoot "ui\assets\revoice_asr_tts.png"
-$readmeSource = Join-Path $repoRoot "docs\PACKAGING.md"
-$uiAssetsDir = Join-Path $repoRoot "ui\assets"
+$projectReadmeZh = Join-Path $repoRoot "README.md"
+$projectReadmeEn = Join-Path $repoRoot "README.en.md"
+$pyprojectSource = Join-Path $repoRoot "pyproject.toml"
+$uvLockSource = Join-Path $repoRoot "uv.lock"
+$envExampleSource = Join-Path $repoRoot ".env.example"
 $assetDir = Join-Path $repoRoot "asset"
-$qwenRootDir = Join-Path $repoRoot "bin\Qwen3-ASR-Transcribe"
-$qwenPackageDir = Join-Path $qwenRootDir "qwen_asr_gguf"
-$qwenModelDir = Join-Path $qwenRootDir "model"
-$qwenReadme = Join-Path $qwenRootDir "readme.md"
-$qwenTranscribeExe = Join-Path $qwenRootDir "transcribe.exe"
+$assetExcludeFiles = @("*.mp3", "*.wav", "*.ogg", "*.flac", "*.m4a", "*.aac", "*.wma")
 $ffmpegDir = Join-Path $repoRoot "bin\ffmpeg"
+$flashAttnDir = Join-Path $repoRoot "bin\flash_attn"
+$vendorRoot = Join-Path $repoRoot "vendor"
 $upxCommand = Get-Command upx -ErrorAction SilentlyContinue
 
 function Stop-ProcessesInDirectory([string]$targetDir) {
@@ -67,45 +76,93 @@ function Remove-DirectorySafely([string]$targetDir) {
     }
 }
 
-function New-PyInstallerVersionFile([string]$targetFile) {
-    $content = @"
-VSVersionInfo(
-  ffi=FixedFileInfo(
-    filevers=($($fileVersion.Replace('.', ', '))),
-    prodvers=($($fileVersion.Replace('.', ', '))),
-    mask=0x3f,
-    flags=0x0,
-    OS=0x40004,
-    fileType=0x1,
-    subtype=0x0,
-    date=(0, 0)
-  ),
-  kids=[
-    StringFileInfo([
-      StringTable(
-        '080404B0',
-        [
-          StringStruct('CompanyName', 'Revoice'),
-          StringStruct('FileDescription', 'Revoice ASR-TTS'),
-          StringStruct('FileVersion', '$fileVersion'),
-          StringStruct('InternalName', '$packageName'),
-          StringStruct('OriginalFilename', '$packageName.exe'),
-          StringStruct('ProductName', 'Revoice ASR-TTS'),
-          StringStruct('ProductVersion', '$appVersion')
-        ]
-      )
-    ]),
-    VarFileInfo([VarStruct('Translation', [2052, 1200])])
-  ]
-)
-"@
-    Set-Content -Path $targetFile -Value $content -Encoding ASCII
+function Invoke-RobocopyCopy(
+    [string]$sourceDir,
+    [string]$targetDir,
+    [string[]]$excludeDirs = @(),
+    [string[]]$excludeFiles = @()
+) {
+    if (-not (Test-Path $sourceDir)) {
+        throw "复制源目录不存在: $sourceDir"
+    }
+
+    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+
+    $robocopyArgs = @(
+        $sourceDir,
+        $targetDir,
+        "/E",
+        "/R:1",
+        "/W:1",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NJS",
+        "/NP"
+    )
+
+    if ($excludeDirs.Count -gt 0) {
+        $robocopyArgs += "/XD"
+        $robocopyArgs += $excludeDirs
+    }
+    if ($excludeFiles.Count -gt 0) {
+        $robocopyArgs += "/XF"
+        $robocopyArgs += $excludeFiles
+    }
+
+    & robocopy @robocopyArgs | Out-Host
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ge 8) {
+        throw "robocopy 复制失败，退出码: $exitCode (source=$sourceDir target=$targetDir)"
+    }
 }
 
-function Add-OptionalPyInstallerFileArg([ref]$argsRef, [string]$optionName, [string]$sourcePath, [string]$destinationPath) {
-    if (Test-Path $sourcePath) {
-        $argsRef.Value += "$optionName=$sourcePath`:$destinationPath"
+function Copy-FileIfExists([string]$sourcePath, [string]$targetPath) {
+    if (-not (Test-Path $sourcePath)) {
+        return
     }
+
+    $targetParent = Split-Path -Parent $targetPath
+    if ($targetParent) {
+        New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
+    }
+    Copy-Item -Path $sourcePath -Destination $targetPath -Force
+}
+
+function Write-LauncherScript([string]$launcherPath) {
+    $content = @"
+@echo off
+setlocal
+set "APP_ROOT=%~dp0"
+if "%APP_ROOT:~-1%"=="\" set "APP_ROOT=%APP_ROOT:~0,-1%"
+where uv >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo 未检测到 uv。请先安装 uv: https://docs.astral.sh/uv/getting-started/installation/
+    exit /b 1
+)
+pushd "%APP_ROOT%"
+set "UV_PROJECT_ENVIRONMENT=%APP_ROOT%\.venv"
+set "PYTHONPATH=%APP_ROOT%"
+set "PATH=%APP_ROOT%\bin\ffmpeg\bin;%APP_ROOT%\bin\ffmpeg;%PATH%"
+set "PYTHONUTF8=1"
+uv sync --frozen
+if errorlevel 1 (
+    echo.
+    echo uv sync failed.
+    popd
+    exit /b 1
+)
+uv run python "%APP_ROOT%\main.py" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
+if not "%EXIT_CODE%"=="0" (
+    echo.
+    echo Revoice exited with code %EXIT_CODE%.
+)
+exit /b %EXIT_CODE%
+"@
+    Set-Content -Path $launcherPath -Value $content -Encoding Default
 }
 
 function Test-UpxSafeTarget([string]$filePath) {
@@ -140,8 +197,7 @@ function Test-UpxSafeTarget([string]$filePath) {
         "arrow*.dll",
         "parquet*.dll",
         "opencv*.dll",
-        "ffmpeg*.exe",
-        "transcribe.exe"
+        "ffmpeg*.exe"
     )
     foreach ($pattern in $blockedNamePatterns) {
         if ($fileName -like $pattern) {
@@ -150,15 +206,7 @@ function Test-UpxSafeTarget([string]$filePath) {
     }
 
     $blockedPathFragments = @(
-        "\PySide6\",
-        "\pandas\",
-        "\numpy\",
-        "\pyarrow\",
-        "\torch\",
-        "\triton\",
-        "\nvidia\",
-        "\bin\ffmpeg\",
-        "\bin\Qwen3-ASR-Transcribe\"
+        "\bin\ffmpeg\"
     )
     foreach ($fragment in $blockedPathFragments) {
         if ($normalizedPath.IndexOf($fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -200,28 +248,16 @@ function Invoke-UpxCompression([string]$targetDir, [string]$upxExePath) {
     Write-Host "UPX post-pack completed. compressed=$compressedCount skipped=$skippedCount"
 }
 
-function Remove-RedundantPyArrowRootDlls([string]$packageRoot) {
-    $pyarrowDir = Join-Path $packageRoot "pyarrow"
-    if (-not (Test-Path $pyarrowDir)) {
-        return
-    }
+Write-Host "Building $packageName with Cython bundle packaging ..."
 
-    $patterns = @("arrow*.dll", "parquet*.dll")
-    foreach ($pattern in $patterns) {
-        $rootDlls = Get-ChildItem -Path $packageRoot -Filter $pattern -File -ErrorAction SilentlyContinue
-        foreach ($rootDll in $rootDlls) {
-            $packageDll = Join-Path $pyarrowDir $rootDll.Name
-            if (Test-Path $packageDll) {
-                Remove-Item $rootDll.FullName -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
+if (-not (Test-Path $venvPython)) {
+    throw "未找到虚拟环境 Python: $venvPython"
 }
-
-Write-Host "Building $packageName with PyInstaller ..."
-
-if (-not $upxCommand) {
-    throw "未找到 upx，可先安装或把 upx 加入 PATH。"
+if (-not (Test-Path $helperScript)) {
+    throw "未找到 Cython 打包 helper: $helperScript"
+}
+if (-not (Test-Path $entryScript)) {
+    throw "入口脚本不存在: $entryScript"
 }
 
 Remove-DirectorySafely $packageDir
@@ -229,118 +265,91 @@ Remove-DirectorySafely $buildRoot
 
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $specRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $workRoot | Out-Null
 
 if (-not (Test-Path $appIcon) -and (Test-Path $appIconPng)) {
     Write-Host "Generating Windows icon from $appIconPng ..."
-    uv run --with pillow python -c "from PIL import Image; from pathlib import Path; src=Path(r'$appIconPng'); dst=Path(r'$appIcon'); dst.parent.mkdir(parents=True, exist_ok=True); Image.open(src).convert('RGBA').save(dst, format='ICO', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+    & $venvPython -c "from PIL import Image; from pathlib import Path; src=Path(r'$appIconPng'); dst=Path(r'$appIcon'); dst.parent.mkdir(parents=True, exist_ok=True); Image.open(src).convert('RGBA').save(dst, format='ICO', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to generate Windows icon: $appIcon"
     }
-} elseif (-not (Test-Path $appIcon)) {
-    Write-Warning "Windows icon file not found: $appIcon"
 }
 
-New-PyInstallerVersionFile $versionFile
-
-$pyiArgs = @(
-    "run",
-    "--with", "pyinstaller>=6.15",
-    "--with", "pillow",
-    "python",
-    "-m",
-    "PyInstaller",
-    "--noconfirm",
-    "--clean",
-    "--noupx",
-    "--onedir",
-    "--contents-directory=.",
-    "--distpath=$distRoot",
-    "--workpath=$workRoot",
-    "--specpath=$specRoot",
-    "--name=$packageName",
-    "--version-file=$versionFile",
-    "--windowed",
-    "--paths=$repoRoot",
-    "--paths=$qwenRootDir",
-    "--exclude-module=gradio",
-    "--exclude-module=gradio_client",
-    "--exclude-module=fastapi",
-    "--exclude-module=starlette",
-    # "--exclude-module=IPython",
-    # "--exclude-module=ipykernel",
-    # "--exclude-module=jedi",
-    "--exclude-module=expecttest",
-    "--exclude-module=notebook",
-    "--exclude-module=jupyter_client",
-    "--exclude-module=jupyter_core",
-    # "--exclude-module=sklearn",
-    # "--exclude-module=pytest",
-    "--collect-all=indextts",
-    "--collect-all=flash_attn",
-    "--collect-all=triton",
-    "--collect-all=omegaconf",
-    "--collect-all=torchcodec",
-    "--collect-all=audiotools",
-    "--collect-all=wetext",
-    "--collect-all=contractions",
-    "--collect-submodules=antlr4",
-    "--collect-submodules=funasr",
-    "--collect-data=funasr",
-    "--hidden-import=yaml",
-    "--hidden-import=srt",
-    "--hidden-import=ui.app",
-    "--hidden-import=app.core.model_setup",
-    "--hidden-import=modelscope.hub.snapshot_download",
-    "--hidden-import=modelscope.pipelines.audio.funasr_pipeline",
-    "--hidden-import=modelscope.models.audio.funasr.model",
-    "--hidden-import=flash_attn_2_cuda",
-    "--copy-metadata=g2p-en",
-    "--copy-metadata=flash_attn",
-    "--copy-metadata=torchcodec",
-    "--copy-metadata=descript-audiotools",
-    "--copy-metadata=wetext",
-    "--copy-metadata=contractions",
-    "--copy-metadata=transformers",
-    "--add-data=$uiAssetsDir`:ui/assets",
-    "--add-data=$qwenModelDir`:bin/Qwen3-ASR-Transcribe/model",
-    "--add-data=$ffmpegDir`:bin/ffmpeg"
+$helperArgs = @(
+    $helperScript,
+    "--repo-root", $repoRoot,
+    "--output-root", $compiledRoot,
+    "--build-root", $compiledBuildRoot
 )
-
-if (Test-Path $appIcon) {
-    $pyiArgs += "--icon=$appIcon"
+if ($DryRun) {
+    $helperArgs += "--dry-run"
 }
 
-Add-OptionalPyInstallerFileArg ([ref]$pyiArgs) "--add-data" $readmeSource "."
-Add-OptionalPyInstallerFileArg ([ref]$pyiArgs) "--add-data" $qwenReadme "bin/Qwen3-ASR-Transcribe"
-Add-OptionalPyInstallerFileArg ([ref]$pyiArgs) "--add-data" $qwenPackageDir "bin/Qwen3-ASR-Transcribe/qwen_asr_gguf"
-Add-OptionalPyInstallerFileArg ([ref]$pyiArgs) "--add-binary" $qwenTranscribeExe "bin/Qwen3-ASR-Transcribe"
-
-$pyiArgs += $entryScript
-
-uv @pyiArgs
+Write-Host "Compiling local packages into pyd modules ..."
+& $venvPython @helperArgs
 if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller build failed with exit code $LASTEXITCODE"
+    throw "Cython bundle build failed with exit code $LASTEXITCODE"
 }
 
-if (-not (Test-Path $packageDir)) {
-    throw "PyInstaller output directory not found: $packageDir"
+if ($DryRun) {
+    Write-Host "Dry run enabled. Skipping runtime copy and installer payload assembly."
+    return
+}
+
+New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+
+Write-Host "Copying compiled application payload ..."
+Invoke-RobocopyCopy $compiledRoot $packageDir @("__pycache__", "cy", "tmp", "build")
+
+Copy-FileIfExists $entryScript (Join-Path $packageDir "main.py")
+Copy-FileIfExists $projectReadmeZh (Join-Path $packageDir "README.md")
+Copy-FileIfExists $projectReadmeEn (Join-Path $packageDir "README.en.md")
+Copy-FileIfExists $pyprojectSource (Join-Path $packageDir "pyproject.toml")
+Copy-FileIfExists $uvLockSource (Join-Path $packageDir "uv.lock")
+Copy-FileIfExists $envExampleSource (Join-Path $packageDir ".env.example")
+
+if ($IncludeBundledFfmpeg -and (Test-Path $ffmpegDir)) {
+    Invoke-RobocopyCopy $ffmpegDir (Join-Path $packageDir "bin\ffmpeg") @("__pycache__")
+} elseif ($IncludeBundledFfmpeg) {
+    Write-Warning "已指定 -IncludeBundledFfmpeg，但未找到本地 ffmpeg 目录: $ffmpegDir"
+} else {
+    Write-Host "Skipping bundled ffmpeg copy by default. Install ffmpeg separately or place it under bin\\ffmpeg manually if needed."
+}
+if (Test-Path $flashAttnDir) {
+    Invoke-RobocopyCopy $flashAttnDir (Join-Path $packageDir "bin\flash_attn") @("__pycache__")
+}
+if (Test-Path $assetDir) {
+    Invoke-RobocopyCopy $assetDir (Join-Path $packageDir "asset") @("__pycache__") $assetExcludeFiles
+} else {
+    New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "asset") | Out-Null
+}
+if (Test-Path $vendorRoot) {
+    Invoke-RobocopyCopy $vendorRoot (Join-Path $packageDir "vendor") @("__pycache__", "build", ".git", ".ipynb_checkpoints")
 }
 
 $outputsDir = Join-Path $packageDir "outputs"
 $checkpointsDir = Join-Path $packageDir "checkpoints"
 $logsDir = Join-Path $packageDir "logs"
+$launcherPath = Join-Path $packageDir $launcherName
 
 New-Item -ItemType Directory -Force -Path $outputsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $checkpointsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
+Write-LauncherScript $launcherPath
 
-if (-not (Test-Path (Join-Path $packageDir "asset"))) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "asset") | Out-Null
+if (-not (Test-Path $launcherPath)) {
+    throw "启动脚本生成失败: $launcherPath"
+}
+if (-not (Test-Path (Join-Path $packageDir "pyproject.toml"))) {
+    throw "pyproject.toml 复制失败: $(Join-Path $packageDir 'pyproject.toml')"
 }
 
-Remove-RedundantPyArrowRootDlls $packageDir
-Invoke-UpxCompression $packageDir $upxCommand.Source
+if ($NoUpx) {
+    Write-Host "Skipping UPX post-pack because -NoUpx was specified."
+} elseif ($upxCommand) {
+    Invoke-UpxCompression $packageDir $upxCommand.Source
+} else {
+    Write-Warning "未找到 upx，跳过 post-pack 压缩。"
+}
 
 Write-Host "Build completed: $packageDir"
+

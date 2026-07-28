@@ -11,18 +11,17 @@ $innoScript = Join-Path $scriptDir "installer.iss"
 
 $appName = "Revoice ASR-TTS"
 $appId = "Revoice-ASR-TTS"
-$appVersion = "0.0.5"
+$appVersion = "0.0.6"
 $packageName = "Revoice-ASR-TTS-v$appVersion"
-$packageExeName = "$packageName.exe"
+$packageLauncherName = "Launch-Revoice-ASR-TTS.bat"
 $distRoot = Join-Path $repoRoot "dist"
 $packageDir = Join-Path $distRoot $packageName
-$packageExe = Join-Path $packageDir $packageExeName
+$packageLauncher = Join-Path $packageDir $packageLauncherName
 $appIcon = Join-Path $repoRoot "ui\assets\revoice_asr_tts.ico"
+$runtimeIconRelativePath = "ui\assets\revoice_asr_tts.ico"
 
-$installerBuildRoot = Join-Path $repoRoot "build\nsis"
-$payloadRoot = Join-Path $installerBuildRoot "payload"
-$payloadArchive = Join-Path $payloadRoot "$packageName.7z"
 $outputInstaller = Join-Path $distRoot "$packageName-Setup.exe"
+$maxSingleInstallerBytes = 4GB
 
 function Find-FirstCommand([string[]]$names) {
     foreach ($name in $names) {
@@ -92,10 +91,10 @@ if (-not $innoCommand) {
 }
 
 if ($RebuildApp) {
-    Write-Host "Rebuilding application package with PyInstaller ..."
+    Write-Host "Rebuilding application package with Cython bundle packaging ..."
     & $buildScript
     if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller build failed with exit code $LASTEXITCODE"
+        throw "Application build failed with exit code $LASTEXITCODE"
     }
 }
 
@@ -107,8 +106,14 @@ if (-not (Test-Path $packageDir)) {
     throw "应用目录不存在: $packageDir。请先运行 build.ps1，或加上 -RebuildApp。"
 }
 
-if (-not (Test-Path $packageExe)) {
-    throw "应用主程序不存在: $packageExe"
+if (-not (Test-Path $packageLauncher)) {
+    throw "应用启动脚本不存在: $packageLauncher"
+}
+
+$packageSizeBytes = Get-DirectorySizeBytes $packageDir
+if ($packageSizeBytes -ge $maxSingleInstallerBytes) {
+    $packageSizeGb = [Math]::Round($packageSizeBytes / 1GB, 2)
+    Write-Warning "应用目录原始大小为 $packageSizeGb GB，超过 4GB。继续尝试 Inno Setup 压缩；是否能生成单文件安装器，以最终 Setup.exe 大小为准。"
 }
 
 Remove-FileIfExists $outputInstaller
@@ -117,11 +122,12 @@ $innoArgs = @(
     "/Qp",
     "/DAPP_NAME=$appName",
     "/DAPP_VERSION=$appVersion",
-    "/DAPP_EXE=$packageExeName",
+    "/DAPP_LAUNCHER=$packageLauncherName",
     "/DAPP_ID=$appId",
     "/DOUT_DIR=$distRoot",
     "/DOUT_FILENAME=$($packageName)-Setup",
-    "/DPACKAGE_DIR=$packageDir"
+    "/DPACKAGE_DIR=$packageDir",
+    "/DAPP_ICON_FILE=$runtimeIconRelativePath"
 )
 
 if (Test-Path $appIcon) {
@@ -130,10 +136,20 @@ if (Test-Path $appIcon) {
 
 $innoArgs += $innoScript
 
-Write-Host "Building single-file installer with Inno Setup (Ultra LZMA2 compression, this may take a while) ..."
+Write-Host ("Building single-file installer with Inno Setup (package size: {0:N2} GB) ..." -f ($packageSizeBytes / 1GB))
 & $innoCommand.FullName @innoArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup 打包失败，退出码: $LASTEXITCODE"
+}
+
+if (-not (Test-Path $outputInstaller)) {
+    throw "Inno Setup 已完成，但未找到输出安装包: $outputInstaller"
+}
+
+$installerSizeBytes = (Get-Item $outputInstaller).Length
+if ($installerSizeBytes -ge $maxSingleInstallerBytes) {
+    $installerSizeGb = [Math]::Round($installerSizeBytes / 1GB, 2)
+    throw "最终 Setup.exe 大小为 $installerSizeGb GB，已超过单文件安装器 4GB 上限。请改用分卷打包，或继续缩减内容后重试。"
 }
 
 Write-Host "Installer created: $outputInstaller"

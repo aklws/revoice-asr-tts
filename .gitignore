@@ -31,25 +31,25 @@ Thumbs.db
 logs/
 outputs/
 .dbg/
+.env
 *.log
 *.tmp
 *.bak
 settings.json
+debug-*.md
+nuitka-crash-report*.xml
+docs/debug-*.md
 
 # Local models and media assets
 checkpoints/
-asset/
+asset/*
+!asset/Principle.png
 scripts/
 
 # Build artifacts
 build/
 dist/
 *.spec
-
-# Private or local-only docs/scripts not intended for GitHub
-docs/
-packaging/
-uv.lock
 
 # App-specific local runtime binaries
 bin/

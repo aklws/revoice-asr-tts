@@ -16,6 +16,7 @@ import soundfile as sf
 from app.core.audio import resample_waveform
 from app.core.config import CHECKPOINTS_DIR, DEFAULT_EMOTION_MODEL_DIR, get_settings
 from app.core.logging import get_logger
+from app.core.modelscope_compat import snapshot_download as modelscope_snapshot_download
 
 logger = get_logger(__name__)
 StatusCallback = Callable[[str], None]
@@ -71,12 +72,6 @@ def _register_modelscope_funasr_model() -> None:
 def _load_modelscope_tasks() -> Any:
     module = importlib.import_module("modelscope.utils.constant")
     return module.Tasks
-
-
-@cache
-def _load_modelscope_snapshot_download() -> Any:
-    module = importlib.import_module("modelscope.hub.snapshot_download")
-    return module.snapshot_download
 
 
 @cache
@@ -244,12 +239,11 @@ class EmotionRecognitionService:
         if _has_local_model_files(self.model_dir):
             return
 
-        snapshot_download = _load_modelscope_snapshot_download()
         self.model_dir.parent.mkdir(parents=True, exist_ok=True)
         if status_callback is not None:
             status_callback(f"正在下载实验性情感识别模型到 {self.model_dir} ...")
         logger.info("emotion2vec+ 未找到，开始下载到 {}", self.model_dir)
-        snapshot_download(self.model_id, local_dir=str(self.model_dir))
+        modelscope_snapshot_download(self.model_id, local_dir=str(self.model_dir))
         if not _has_local_model_files(self.model_dir):
             raise RuntimeError(f"emotion2vec+ 下载后仍未在本地目录找到模型文件: {self.model_dir}")
 

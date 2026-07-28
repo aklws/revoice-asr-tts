@@ -136,6 +136,13 @@ def _locate_snapshot(repo_id: str, local_cache_dir: str) -> str | None:
     return None
 
 
+def _list_missing_files(base_dir: str, required_files: tuple[str, ...]) -> list[str]:
+    return [
+        fname for fname in required_files
+        if not os.path.isfile(os.path.join(base_dir, fname))
+    ]
+
+
 def ensure_models_available(
     model_dir: str,
     bigvgan_repo: str = _BIGVGAN_REPO,
@@ -164,6 +171,12 @@ def ensure_models_available(
 
     # w2v-bert-2.0 is a full repo needed by SeamlessM4T and Wav2Vec2BertModel.
     w2v_dir = os.path.join(cache_dir, "w2v-bert-2.0")
+    required_w2v_files = (
+        "config.json",
+        "configuration.json",
+        "model.safetensors",
+        "preprocessor_config.json",
+    )
     _emit_status(status_callback, "正在准备 IndexTTS 附属模型：w2v-bert")
     _emit_progress(
         progress_callback,
@@ -172,14 +185,29 @@ def ensure_models_available(
         maximum=total_steps,
         detail="正在检查 w2v-bert-2.0 ...",
     )
-    if not os.path.isdir(w2v_dir) or not os.listdir(w2v_dir):
-        old_snapshot = _locate_snapshot("facebook/w2v-bert-2.0", cache_dir)
-        if old_snapshot:
-            logger.info("正在将已有 HF 缓存中的 w2v-bert-2.0 迁移到 {}...", w2v_dir)
-            shutil.copytree(old_snapshot, w2v_dir, dirs_exist_ok=True)
-        else:
+    missing_w2v_files = _list_missing_files(w2v_dir, required_w2v_files)
+    if missing_w2v_files:
+        shared_w2v_dir = os.path.join(os.path.dirname(model_dir), "IndexTTS-2", "hf_cache", "w2v-bert-2.0")
+        if os.path.abspath(shared_w2v_dir) != os.path.abspath(w2v_dir):
+            shared_missing = _list_missing_files(shared_w2v_dir, required_w2v_files)
+            if not shared_missing:
+                logger.info("正在从官方 IndexTTS-2 缓存补齐 w2v-bert-2.0 到 {}...", w2v_dir)
+                shutil.copytree(shared_w2v_dir, w2v_dir, dirs_exist_ok=True)
+                missing_w2v_files = _list_missing_files(w2v_dir, required_w2v_files)
+        if missing_w2v_files:
+            old_snapshot = _locate_snapshot("facebook/w2v-bert-2.0", cache_dir)
+            if old_snapshot:
+                logger.info("正在将已有 HF 缓存中的 w2v-bert-2.0 迁移到 {}...", w2v_dir)
+                shutil.copytree(old_snapshot, w2v_dir, dirs_exist_ok=True)
+                missing_w2v_files = _list_missing_files(w2v_dir, required_w2v_files)
+        if missing_w2v_files:
             logger.info("正在下载 w2v-bert-2.0 到 {}...", w2v_dir)
             snapshot_download("facebook/w2v-bert-2.0", local_dir=w2v_dir)
+            missing_w2v_files = _list_missing_files(w2v_dir, required_w2v_files)
+        if missing_w2v_files:
+            raise RuntimeError(
+                f"w2v-bert-2.0 不完整，缺少关键文件: {missing_w2v_files}，目录: {w2v_dir}"
+            )
     paths["w2v_bert"] = w2v_dir
     _emit_progress(
         progress_callback,

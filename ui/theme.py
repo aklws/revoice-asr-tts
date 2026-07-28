@@ -55,6 +55,15 @@ _THEME_PALETTES: dict[str, dict[str, str]] = {
         "warning_bg": "#1a1720",
         "warning_border": "#4a3b66",
         "warning_text": "#d6ccff",
+        "tts_official_bg": "#12203b",
+        "tts_official_border": "#3768c8",
+        "tts_official_text": "#cfe1ff",
+        "tts_japanese_bg": "#221834",
+        "tts_japanese_border": "#7757c9",
+        "tts_japanese_text": "#eadcff",
+        "tts_custom_bg": "#2a1a0d",
+        "tts_custom_border": "#c47a2c",
+        "tts_custom_text": "#ffd9b0",
         "error_bg": "#231316",
         "error_border": "#6a2e37",
         "error_text": "#ffc9d0",
@@ -108,6 +117,15 @@ _THEME_PALETTES: dict[str, dict[str, str]] = {
         "warning_bg": "#f4f1ff",
         "warning_border": "#d6cdf9",
         "warning_text": "#4d3a8f",
+        "tts_official_bg": "#eaf2ff",
+        "tts_official_border": "#bdd1f7",
+        "tts_official_text": "#214b95",
+        "tts_japanese_bg": "#f2edff",
+        "tts_japanese_border": "#d9caf9",
+        "tts_japanese_text": "#6441b2",
+        "tts_custom_bg": "#fff4e8",
+        "tts_custom_border": "#f0d1ad",
+        "tts_custom_text": "#9a5b12",
         "error_bg": "#fff1f3",
         "error_border": "#f0c5cf",
         "error_text": "#8a2338",
@@ -310,6 +328,18 @@ QLabel#DashboardValue {{
     font-weight: 700;
 }}
 
+QLabel#SummaryValue[state="official"] {{
+    color: {tts_official_text};
+}}
+
+QLabel#SummaryValue[state="japanese"] {{
+    color: {tts_japanese_text};
+}}
+
+QLabel#SummaryValue[state="custom"] {{
+    color: {tts_custom_text};
+}}
+
 QLabel#CompactLabel {{
     color: {muted_text};
     font-size: 11px;
@@ -330,6 +360,24 @@ QLabel#StatusBadge {{
     font-size: 12px;
     font-weight: 700;
     min-width: 64px;
+}}
+
+QLabel#StatusBadge[state="official"] {{
+    background: {tts_official_bg};
+    color: {tts_official_text};
+    border: 1px solid {tts_official_border};
+}}
+
+QLabel#StatusBadge[state="japanese"] {{
+    background: {tts_japanese_bg};
+    color: {tts_japanese_text};
+    border: 1px solid {tts_japanese_border};
+}}
+
+QLabel#StatusBadge[state="custom"] {{
+    background: {tts_custom_bg};
+    color: {tts_custom_text};
+    border: 1px solid {tts_custom_border};
 }}
 
 QFrame#EmotionPanelCard,

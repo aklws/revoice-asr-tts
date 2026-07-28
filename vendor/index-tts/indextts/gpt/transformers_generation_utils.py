@@ -29,9 +29,22 @@ from transformers.cache_utils import (
     Cache,
     DynamicCache,
     EncoderDecoderCache,
-    OffloadedCache,
     StaticCache,
 )
+try:
+    from transformers.cache_utils import OffloadedCache
+except ImportError:
+    OffloadedCache = None
+    import warnings
+    import transformers
+    warnings.warn(
+        "debug-point offloadedcache-missing: "
+        f"transformers={getattr(transformers, '__version__', 'unknown')} "
+        "cache_utils 中不存在 OffloadedCache，将回退到 DynamicCache。",
+        RuntimeWarning,
+    )
+    class OffloadedCache(DynamicCache):
+        pass
 try:
     from transformers.cache_utils import QuantizedCacheConfig
 except ImportError:
@@ -41,8 +54,22 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 from transformers.modeling_outputs import CausalLMOutputWithPast, Seq2SeqLMOutput
-from transformers.pytorch_utils import isin_mps_friendly
-from transformers.tokenization_utils import ExtensionsTrie
+try:
+    from transformers.pytorch_utils import isin_mps_friendly
+except ImportError:
+    def isin_mps_friendly(elements, test_elements):
+        return torch.isin(elements, test_elements)
+try:
+    from transformers.tokenization_utils import ExtensionsTrie
+except ImportError:
+    class ExtensionsTrie:
+        """Minimal prefix trie used by token healing on newer transformers."""
+
+        def __init__(self, vocab):
+            self._tokens = list(vocab.keys()) if isinstance(vocab, dict) else list(vocab)
+
+        def extensions(self, prefix):
+            return [token for token in self._tokens if token.startswith(prefix)]
 from transformers.utils import (
     ModelOutput,
     is_accelerate_available,

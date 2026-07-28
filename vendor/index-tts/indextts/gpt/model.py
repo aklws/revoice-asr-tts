@@ -5,13 +5,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import transformers
+from transformers.generation.utils import GenerationMixin
 from transformers import GPT2Config, LogitsProcessorList
 from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
-from transformers.utils.model_parallel_utils import (assert_device_map,
-                                                     get_device_map)
+try:
+    from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+except ImportError:
+    def get_device_map(num_layers, devices):
+        device_list = list(devices)
+        if not device_list:
+            device_list = [0]
+        return {device_list[0]: list(range(num_layers))}
+
+    def assert_device_map(device_map, num_layers):
+        assigned = sorted(layer for layers in device_map.values() for layer in layers)
+        expected = list(range(num_layers))
+        if assigned != expected:
+            raise ValueError(f"device_map must cover all layers exactly once: expected={expected}, got={assigned}")
 
 from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
@@ -42,7 +55,7 @@ class ResBlock(nn.Module):
         return F.relu(self.net(x) + x)
 
 
-class GPT2InferenceModel(GPT2PreTrainedModel):
+class GPT2InferenceModel(GPT2PreTrainedModel, GenerationMixin):
     def __init__(self, config, gpt, text_pos_emb, embeddings, norm, linear, kv_cache=False):
         super().__init__(config)
         # Note: the argument named `text_pos_emb` here actually represents the mel position embedding
@@ -267,6 +280,9 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
                             n_layer=layers,
                             n_head=heads,
                             activation_function=activation_function or "gelu_new",
+                            bos_token_id=None,
+                            eos_token_id=None,
+                            pad_token_id=None,
                             gradient_checkpointing=checkpointing,
                             use_cache=not checkpointing)
     gpt = GPT2Model(gpt_config)
@@ -399,6 +415,9 @@ class UnifiedVoice(nn.Module):
             n_embd=self.model_dim,
             n_layer=self.layers,
             n_head=self.heads,
+            bos_token_id=self.start_mel_token,
+            eos_token_id=self.stop_mel_token,
+            pad_token_id=self.stop_mel_token,
             gradient_checkpointing=False,
             use_cache=True,
         )

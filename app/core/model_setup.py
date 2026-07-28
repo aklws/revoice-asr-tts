@@ -14,10 +14,13 @@ from modelscope.hub.callback import ProgressCallback as ModelScopeProgressCallba
 from app.core.config import (
     CHECKPOINTS_DIR,
     DEFAULT_EMOTION_MODEL_DIR,
-    DEFAULT_INDEX_TTS_MODEL_DIR,
+    default_index_tts_model_dir,
+    get_settings,
+    resolve_supported_index_tts_model_repos,
 )
-from app.core.paths import get_bin_dir
 from app.core.logging import get_logger
+from app.core.modelscope_compat import get_model_files as modelscope_get_model_files
+from app.core.modelscope_compat import snapshot_download as modelscope_snapshot_download
 
 logger = get_logger(__name__)
 StatusCallback = Callable[[str], None]
@@ -38,12 +41,6 @@ class _ModelSpec:
 
 _DOWNLOADABLE_MODELS: tuple[_ModelSpec, ...] = (
     _ModelSpec(
-        display_name="IndexTTS-2",
-        target_dir=DEFAULT_INDEX_TTS_MODEL_DIR,
-        repo="IndexTeam/IndexTTS-2",
-        markers=("config.yaml",),
-    ),
-    _ModelSpec(
         display_name="emotion2vec+",
         target_dir=DEFAULT_EMOTION_MODEL_DIR,
         repo="iic/emotion2vec_plus_base",
@@ -51,30 +48,7 @@ _DOWNLOADABLE_MODELS: tuple[_ModelSpec, ...] = (
         marker_policy="any",
     ),
 )
-_LOCAL_MODELS: tuple[_ModelSpec, ...] = (
-    _ModelSpec(
-        display_name="Qwen3-ASR",
-        target_dir=get_bin_dir("Qwen3-ASR-Transcribe", "model"),
-        markers=(
-            "qwen3_asr_encoder_backend.int4.onnx",
-            "qwen3_asr_encoder_frontend.int4.onnx",
-            "qwen3_asr_llm.q4_k.gguf",
-        ),
-        marker_policy="all",
-    ),
-)
-
-
-@cache
-def _load_modelscope_hub_api() -> type[object]:
-    module = importlib.import_module("modelscope.hub.api")
-    return module.HubApi
-
-
-@cache
-def _load_modelscope_snapshot_download():
-    module = importlib.import_module("modelscope.hub.snapshot_download")
-    return module.snapshot_download
+_LOCAL_MODELS: tuple[_ModelSpec, ...] = ()
 
 
 @cache
@@ -226,10 +200,8 @@ def _has_model_markers(model: _ModelSpec) -> bool:
 
 
 def _get_modelscope_repo_stats(repo: str) -> tuple[int, int] | None:
-    HubApi = _load_modelscope_hub_api()
-
     try:
-        repo_files = HubApi().get_model_files(repo, recursive=True, use_cookies=False)
+        repo_files = modelscope_get_model_files(repo)
     except Exception as exc:
         logger.warning("获取 {} 文件清单失败，将退回不确定进度条: {}", repo, exc)
         return None
@@ -318,8 +290,6 @@ def _modelscope_download(
     target_dir: str,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
-    snapshot_download = _load_modelscope_snapshot_download()
-
     stats = _get_modelscope_repo_stats(repo)
     progress_callbacks = None
     if stats is None:
@@ -350,7 +320,11 @@ def _modelscope_download(
             ).callback_type()
         ]
 
-    snapshot_download(repo, local_dir=target_dir, progress_callbacks=progress_callbacks)
+    modelscope_snapshot_download(
+        repo,
+        local_dir=target_dir,
+        progress_callbacks=progress_callbacks,
+    )
 
     if stats is not None:
         total_bytes, _ = stats
@@ -389,17 +363,102 @@ def _download_model(
 
 def _ensure_indextts_aux_models(
     model_dir: Path,
+    display_name: str,
     status_callback: StatusCallback | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
     ensure_models_available = _load_indextts_ensure_models_available()
-    _emit_status(status_callback, "正在准备 IndexTTS 附属模型...")
+
+    def _wrapped_status(message: str) -> None:
+        _emit_status(status_callback, f"{display_name}: {message}")
+
+    def _wrapped_progress(payload: ProgressPayload) -> None:
+        if progress_callback is None:
+            return
+        wrapped = dict(payload)
+        sub_label = str(wrapped.get("sub_label", "")).strip()
+        detail = str(wrapped.get("detail", "")).strip()
+        wrapped["sub_label"] = f"{display_name} / {sub_label}" if sub_label else display_name
+        if detail:
+            wrapped["detail"] = f"{display_name}: {detail}"
+        progress_callback(wrapped)
+
+    _emit_status(status_callback, f"正在准备 {display_name} 附属模型...")
     ensure_models_available(
         str(model_dir),
-        status_callback=status_callback,
-        progress_callback=progress_callback,
+        status_callback=_wrapped_status,
+        progress_callback=_wrapped_progress,
     )
-    _emit_status(status_callback, "IndexTTS 附属模型已就绪")
+    _emit_status(status_callback, f"{display_name} 附属模型已就绪")
+
+
+def _repo_display_name(repo: str) -> str:
+    repo_name = repo.rsplit("/", 1)[-1] if "/" in repo else repo
+    return repo_name if repo_name else "IndexTTS-2"
+
+
+def _resolve_index_tts_model_specs() -> tuple[_ModelSpec, ...]:
+    settings = get_settings()
+    specs: list[_ModelSpec] = []
+    for repo in resolve_supported_index_tts_model_repos():
+        if repo == settings.index_tts_model_repo:
+            target_dir = settings.index_tts_model_dir
+        else:
+            target_dir = default_index_tts_model_dir(repo)
+        display_name = _repo_display_name(repo)
+        specs.append(
+            _ModelSpec(
+                display_name=display_name,
+                target_dir=target_dir,
+                repo=repo,
+                markers=("config.yaml",),
+            )
+        )
+    return tuple(specs)
+
+
+def _resolve_asr_model_spec() -> _ModelSpec:
+    settings = get_settings()
+    return _ModelSpec(
+        display_name="Fun-ASR-Nano-2512",
+        target_dir=settings.asr_model_dir,
+        repo=settings.asr_model_repo,
+        markers=("config.yaml",),
+        marker_policy="all",
+    )
+
+
+def _resolve_speaker_model_spec() -> _ModelSpec:
+    settings = get_settings()
+    return _ModelSpec(
+        display_name="CAMPPlus Speaker Verification",
+        target_dir=settings.speaker_model_dir,
+        repo=settings.speaker_model_repo,
+        markers=("README.md", "examples", "configuration.json", "config.yaml"),
+        marker_policy="any",
+    )
+
+
+def _ensure_all_indextts_aux_models(
+    models: tuple[_ModelSpec, ...],
+    progress_reporter: _StartupProgressReporter,
+    status_callback: StatusCallback | None = None,
+) -> None:
+    for model in models:
+        label = f"{model.display_name} 附属模型"
+        progress_reporter.begin_step(
+            label,
+            detail=f"正在检查 {model.display_name} 的 w2v-bert、semantic codec、CAMPPlus、BigVGAN...",
+            current_value=0,
+            current_maximum=4,
+        )
+        _ensure_indextts_aux_models(
+            model.target_dir,
+            model.display_name,
+            status_callback=status_callback,
+            progress_callback=progress_reporter.child_progress_callback(label),
+        )
+        progress_reporter.finish_step(detail=f"{model.display_name} 附属模型已就绪")
 
 
 def ensure_models(
@@ -408,9 +467,13 @@ def ensure_models(
 ) -> None:
     """Check all required models exist; auto-download missing ones."""
     with _MODEL_SETUP_LOCK:
+        index_tts_models = _resolve_index_tts_model_specs()
+        asr_model = _resolve_asr_model_spec()
+        speaker_model = _resolve_speaker_model_spec()
+        downloadable_models = (asr_model, speaker_model, *index_tts_models, *_DOWNLOADABLE_MODELS)
         progress_reporter = _StartupProgressReporter(
             progress_callback,
-            total_steps=len(_LOCAL_MODELS) + len(_DOWNLOADABLE_MODELS) + 1,
+            total_steps=len(_LOCAL_MODELS) + len(downloadable_models) + len(index_tts_models),
         )
         _emit_status(status_callback, "正在检查模型文件...")
         progress_reporter.begin_step(
@@ -437,7 +500,7 @@ def ensure_models(
             logger.error(fail_message)
             raise RuntimeError(fail_message)
 
-        for model in _DOWNLOADABLE_MODELS:
+        for model in downloadable_models:
             progress_reporter.begin_step(
                 model.display_name,
                 detail=f"正在检查 {model.display_name} 模型文件...",
@@ -467,15 +530,8 @@ def ensure_models(
                 logger.error(fail_message)
                 raise RuntimeError(fail_message)
 
-        progress_reporter.begin_step(
-            "IndexTTS 附属模型",
-            detail="正在检查 w2v-bert、semantic codec、CAMPPlus、BigVGAN...",
-            current_value=0,
-            current_maximum=4,
-        )
-        _ensure_indextts_aux_models(
-            DEFAULT_INDEX_TTS_MODEL_DIR,
+        _ensure_all_indextts_aux_models(
+            index_tts_models,
+            progress_reporter,
             status_callback=status_callback,
-            progress_callback=progress_reporter.child_progress_callback("IndexTTS 附属模型"),
         )
-        progress_reporter.finish_step(detail="IndexTTS 附属模型已就绪")

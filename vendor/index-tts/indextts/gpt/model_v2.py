@@ -1,4 +1,5 @@
 import functools
+import os
 
 import torch
 import torch.nn as nn
@@ -7,17 +8,57 @@ import torch.nn.functional as F
 import transformers
 from loguru import logger
 from transformers import GPT2Config, LogitsProcessorList
+from transformers.generation.utils import GenerationMixin
 from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
-from transformers.utils.model_parallel_utils import (assert_device_map,
-                                                     get_device_map)
+from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
 from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.arch_util import AttentionBlock
 from indextts.utils.typical_sampling import TypicalLogitsWarper
+
+
+def _resolve_forced_attn_implementation() -> str | None:
+    raw = os.getenv("INDEXTTS_GPT_ATTN_IMPL", "").strip().lower()
+    if not raw or raw == "auto":
+        return None
+    allowed = {"eager", "sdpa", "flash_attention_2"}
+    if raw not in allowed:
+        logger.warning(
+            "忽略不支持的 INDEXTTS_GPT_ATTN_IMPL={!r}，允许的值为: {}",
+            raw,
+            ", ".join(sorted(allowed)),
+        )
+        return None
+    return raw
+
+
+def _force_attn_implementation(config: GPT2Config, requested: str | None) -> GPT2Config:
+    if requested is None:
+        return config
+    config._attn_implementation_internal = requested
+    config._attn_implementation = requested
+    config._attn_implementation_autoset = False
+    return config
+
+
+def _has_usable_past_key_values(past_key_values) -> bool:
+    if past_key_values is None:
+        return False
+    try:
+        first_layer = past_key_values[0]
+    except (IndexError, KeyError, TypeError):
+        return False
+    if first_layer is None:
+        return False
+    try:
+        first_key = first_layer[0]
+    except (IndexError, KeyError, TypeError):
+        return False
+    return first_key is not None
 
 
 def null_position_embeddings(range, dim):
@@ -43,7 +84,7 @@ class ResBlock(nn.Module):
         return F.relu(self.net(x) + x)
 
 
-class GPT2InferenceModel(GPT2PreTrainedModel):
+class GPT2InferenceModel(GPT2PreTrainedModel, GenerationMixin):
     def __init__(self, config, gpt, text_pos_emb, embeddings, norm, linear, kv_cache=False):
         super().__init__(config)
         # Note: the argument named `text_pos_emb` here actually represents the mel position embedding
@@ -92,8 +133,9 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         token_type_ids = kwargs.get("token_type_ids", None)  # usually None
         if not self.kv_cache:
             past_key_values = None
+        has_usable_past = _has_usable_past_key_values(past_key_values)
         # only last token for inputs_ids if past is defined in kwargs
-        if past_key_values:
+        if has_usable_past:
             input_ids = input_ids[:, -1].unsqueeze(-1)
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
@@ -105,7 +147,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
-            if past_key_values:
+            if has_usable_past:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
         else:
             position_ids = None
@@ -260,7 +302,7 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
     """
     GPT-2 implemented by the HuggingFace library.
     """
-    from transformers import GPT2Config, GPT2Model
+    requested_attn_impl = _resolve_forced_attn_implementation()
     gpt_config = GPT2Config(vocab_size=256,  # Unused.
                             n_positions=max_mel_seq_len + max_text_seq_len,
                             n_ctx=max_mel_seq_len + max_text_seq_len,
@@ -269,7 +311,17 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
                             n_head=heads,
                             gradient_checkpointing=checkpointing,
                             use_cache=not checkpointing)
+    gpt_config = _force_attn_implementation(gpt_config, requested_attn_impl)
     gpt = GPT2Model(gpt_config)
+    actual_attn_impl = getattr(gpt.config, "_attn_implementation", None)
+    first_layer_attn = getattr(getattr(gpt, "h", [None])[0], "attn", None)
+    first_layer_attn_name = type(first_layer_attn).__name__ if first_layer_attn is not None else "<unknown>"
+    logger.info(
+        "IndexTTS GPT 注意力实现: requested={} effective={} layer0={}",
+        requested_attn_impl or "auto",
+        actual_attn_impl,
+        first_layer_attn_name,
+    )
     # Override the built in positional embeddings
     del gpt.wpe
     gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
@@ -446,6 +498,7 @@ class UnifiedVoice(nn.Module):
             logger.warning("启用 GPT 主干 torch.compile 失败，已回退到常规推理。错误: {}", e)
 
     def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False, use_torch_compile=False):
+        requested_attn_impl = _resolve_forced_attn_implementation()
         seq_length = self.max_mel_tokens + self.max_text_tokens + 2
         gpt_config = GPT2Config(
             vocab_size=self.number_mel_codes,
@@ -457,6 +510,7 @@ class UnifiedVoice(nn.Module):
             gradient_checkpointing=False,
             use_cache=True,
         )
+        gpt_config = _force_attn_implementation(gpt_config, requested_attn_impl)
 
         if self.use_accel and torch.cuda.is_available():
             from indextts.accel import GPT2AccelModel, AccelInferenceEngine
@@ -511,6 +565,16 @@ class UnifiedVoice(nn.Module):
 
         # self.inference_model = PrunedGPT2InferenceModel(gpt_config, self.gpt, self.mel_pos_embedding, self.mel_embedding, self.final_norm, self.mel_head)
         self.gpt.wte = self.mel_embedding
+        first_layer_attn = getattr(getattr(self.gpt, "h", [None])[0], "attn", None)
+        first_layer_attn_name = type(first_layer_attn).__name__ if first_layer_attn is not None else "<unknown>"
+        logger.info(
+            "IndexTTS GPT 生成配置: accel={} torch_compile={} requested_attn={} effective_attn={} layer0={}",
+            self.accel_engine is not None,
+            use_torch_compile,
+            requested_attn_impl or "auto",
+            getattr(getattr(self.gpt, "config", None), "_attn_implementation", None),
+            first_layer_attn_name,
+        )
         if use_torch_compile:
             self._maybe_enable_torch_compile()
 
@@ -788,6 +852,7 @@ class UnifiedVoice(nn.Module):
         
         # Use accel engine if available (single sequence only)
         if self.accel_engine is not None and num_return_sequences == 1:
+            logger.info("IndexTTS GPT 生成路径: accel_engine")
             output = self.accel_engine.generate(
                 inputs,  # fake input_ids (all 1s + start_mel_token)
                 max_new_tokens=max_length - trunc_index,
@@ -799,6 +864,11 @@ class UnifiedVoice(nn.Module):
                 tts_text_pos_embedding=self.inference_model.text_pos_embedding,  # text_pos_embedding layer
             )
         else:
+            logger.info(
+                "IndexTTS GPT 生成路径: transformers_generate (attn={} layer0={})",
+                getattr(getattr(self.gpt, "config", None), "_attn_implementation", None),
+                type(getattr(getattr(self.gpt, "h", [None])[0], "attn", None)).__name__,
+            )
             output = self.inference_model.generate(inputs, 
                                                 bos_token_id=self.start_mel_token, pad_token_id=self.stop_mel_token,
                                                 eos_token_id=self.stop_mel_token, attention_mask=attention_mask,

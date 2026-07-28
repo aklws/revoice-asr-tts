@@ -5,14 +5,12 @@ from pathlib import Path
 
 
 def _is_compiled_runtime() -> bool:
-    return bool(getattr(sys, "frozen", False) or globals().get("__compiled__", False))
-
+    return getattr(sys, "frozen", False)
 
 def get_app_root() -> Path:
     if _is_compiled_runtime():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
-
 
 def get_bundle_root() -> Path:
     if _is_compiled_runtime():
@@ -29,7 +27,7 @@ def get_bundle_file(*parts: str) -> Path:
 
 
 def get_vendor_dir(*parts: str) -> Path:
-    """Third-party source libraries (index-tts, Qwen3-ASR-GGUF, etc)."""
+    """Third-party source libraries (index-tts, other vendored libs, etc)."""
     return get_app_root() / "vendor" / Path(*parts)
 
 

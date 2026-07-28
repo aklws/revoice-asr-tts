@@ -30,7 +30,10 @@ The following categories are excluded from the root MIT license when present in 
 
 - This directory contains FFmpeg binaries and related files.
 - It is not covered by the root MIT license.
-- Please review the bundled license files in that directory before redistribution.
+- The current local copy is `FFmpeg 7.1.1 full_build` from `www.gyan.dev`.
+- The bundled `LICENSE` file identifies this local build as `GPL v3`.
+- The bundled `README.txt` points to the upstream source reference for this build.
+- If you redistribute this bundled FFmpeg directory, you must preserve its license notices and comply with the GPL terms applicable to that build instead of treating it as MIT-licensed project code.
 
 ### `bin/Qwen3-ASR-Transcribe/`
 

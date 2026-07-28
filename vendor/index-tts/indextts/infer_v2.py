@@ -173,6 +173,8 @@ class IndexTTS2:
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer(enable_glossary=True)
+        model_hints = " ".join((str(self.model_dir), os.path.basename(self.bpe_path))).lower()
+        self.normalizer.force_japanese = "japanese" in model_hints or re.search(r"(^|[-_/])ja($|[-_/])", model_hints) is not None
         self.normalizer.load()
         logger.info("文本归一化器已加载")
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
@@ -850,6 +852,11 @@ class IndexTTS2:
                         code_len = len_[0].item() if len_.numel() > 0 else len(code)
                     code_lens.append(code_len)
                     max_code_len = max(max_code_len, code_len)
+                
+                if max_code_len == 0:
+                    logger.warning("模型生成了空的语义 token，已跳过当前分段: text={}", sent)
+                    continue
+
                 codes = codes[:, :max_code_len]
                 code_lens = torch.LongTensor(code_lens)
                 code_lens = code_lens.to(self.device)
@@ -991,6 +998,17 @@ class IndexTTS2:
         end_time = time.perf_counter()
 
         self._set_gr_progress(0.9, "正在保存音频...")
+        
+        if not wavs:
+            logger.warning("本次推理未生成任何有效音频片段，已返回空结果。")
+            if stream_return:
+                return None
+            if output_path:
+                yield output_path
+                return
+            yield (sampling_rate, torch.zeros((0,), dtype=torch.int16).numpy())
+            return
+
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
         wav = torch.cat(wavs, dim=1)
         wav_length = wav.shape[-1] / sampling_rate
@@ -1040,7 +1058,7 @@ class QwenEmotion:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
-            torch_dtype=torch.float32,
+            dtype=torch.float32,
         )
         self.model = self.model.to(self.device)
         self.model.eval()

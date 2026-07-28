@@ -19,9 +19,12 @@ def _load_yaml_module():
 
 
 class TextNormalizer:
+    JAPANESE_KANA_PATTERN = r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]"
+
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
+        self.force_japanese = False
         self.char_rep_map = {
             "：": ",",
             "；": ",",
@@ -121,6 +124,9 @@ class TextNormalizer:
         has_pinyin = bool(re.search(TextNormalizer.PINYIN_TONE_PATTERN, s, re.IGNORECASE))
         return has_pinyin
 
+    def use_japanese(self, s):
+        return bool(re.search(TextNormalizer.JAPANESE_KANA_PATTERN, s))
+
     def load(self):
         # print(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         # sys.path.append(model_dir)
@@ -149,7 +155,15 @@ class TextNormalizer:
         if not self.zh_normalizer or not self.en_normalizer:
             logger.error("文本归一化器尚未初始化")
             return ""
-        if self.use_chinese(text):
+        if self.force_japanese or self.use_japanese(text):
+            # Japanese checkpoints provide their own tokenizer/BPE. Avoid routing
+            # kana-containing text into the Chinese TN pipeline, which can mangle
+            # Japanese readings and punctuation.
+            if self.enable_glossary:
+                text = self.apply_glossary_terms(text, lang="en")
+            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+            result = pattern.sub(lambda x: self.char_rep_map[x.group()], text)
+        elif self.use_chinese(text):
             text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:

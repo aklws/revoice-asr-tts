@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -15,13 +17,19 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from app.core.config import DEFAULT_INDEX_TTS_MODEL_DIR, get_settings, resolve_tts_device
+from app.core.config import (
+    default_index_tts_model_dir,
+    get_settings,
+    resolve_index_tts_model_dir,
+    resolve_tts_device,
+)
 from app.core.logging import get_logger
 from app.core.runtime import release_memory
 from app.core.audio import resample_waveform
 
 logger = get_logger(__name__)
-_FIRST_CHUNK_WARMUP_TEXT = "你好，欢迎使用。"
+_DEFAULT_FIRST_CHUNK_WARMUP_TEXT = "你好，欢迎使用。"
+_JAPANESE_FIRST_CHUNK_WARMUP_TEXT = "こんにちは。"
 
 
 def _sanitize_text(text: str) -> str:
@@ -32,6 +40,124 @@ def _sanitize_text(text: str) -> str:
     if not text.endswith((".", "!", "?", "。", "！", "？")):
         text += "."
     return text
+
+
+def _select_warmup_text(model_dir: Path) -> str:
+    configured = os.getenv("INDEX_TTS_WARMUP_TEXT")
+    if configured and configured.strip():
+        return configured.strip()
+    settings = get_settings()
+    hints = " ".join(
+        (
+            settings.index_tts_model_repo,
+            model_dir.name,
+            str(model_dir),
+        )
+    ).lower()
+    if "japanese" in hints or re.search(r"(^|[-_/])ja($|[-_/])", hints):
+        return _JAPANESE_FIRST_CHUNK_WARMUP_TEXT
+    return _DEFAULT_FIRST_CHUNK_WARMUP_TEXT
+
+
+def _is_japanese_model_dir(model_dir: Path) -> bool:
+    hints = " ".join((model_dir.name, str(model_dir))).lower()
+    return "japanese" in hints or re.search(r"(^|[-_/])ja($|[-_/])", hints) is not None
+
+
+def _link_or_copy_file(src: Path, dst: Path) -> None:
+    if dst.exists() or not src.exists():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+        logger.info("已为兼容布局创建硬链接: {} -> {}", dst, src)
+        return
+    except OSError:
+        pass
+    shutil.copy2(src, dst)
+    logger.info("已为兼容布局复制文件: {} -> {}", src, dst)
+
+
+def _copytree_if_missing(src: Path, dst: Path, *, required_entries: tuple[str, ...] | None = None) -> None:
+    if not src.exists():
+        return
+    if dst.exists():
+        if required_entries is None:
+            return
+        missing_entries = [entry for entry in required_entries if not (dst / entry).exists()]
+        if not missing_entries:
+            return
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    logger.info("已为兼容布局复制目录: {} -> {}", src, dst)
+
+
+def _ensure_japanese_model_layout(model_dir: Path) -> None:
+    if not _is_japanese_model_dir(model_dir):
+        return
+
+    official_model_dir = default_index_tts_model_dir("IndexTeam/IndexTTS-2")
+    if not official_model_dir.exists():
+        logger.warning("日语模型依赖官方 IndexTTS-2 基础目录，但当前未找到: {}", official_model_dir)
+        return
+
+    logger.info("检测到日语增量模型目录，正在补齐官方基础文件...")
+
+    # Japanese incremental packages commonly ship only a replaced GPT checkpoint
+    # and tokenizer model, while the rest of the runtime still expects the
+    # standard IndexTTS-2 filenames/layout.
+    _link_or_copy_file(model_dir / "model_jp_163000.pth", model_dir / "gpt.pth")
+    _link_or_copy_file(model_dir / "japanese_bpe.model", model_dir / "bpe.model")
+
+    for filename in ("feat1.pt", "feat2.pt", "s2mel.pth", "wav2vec2bert_stats.pt"):
+        _link_or_copy_file(official_model_dir / filename, model_dir / filename)
+
+    _copytree_if_missing(
+        official_model_dir / "qwen0.6bemo4-merge",
+        model_dir / "qwen0.6bemo4-merge",
+    )
+    _copytree_if_missing(
+        official_model_dir / "hf_cache" / "w2v-bert-2.0",
+        model_dir / "hf_cache" / "w2v-bert-2.0",
+        required_entries=(
+            "config.json",
+            "configuration.json",
+            "model.safetensors",
+            "preprocessor_config.json",
+        ),
+    )
+
+
+def _normalize_transformers_aux_configs(model_dir: Path) -> None:
+    """Patch known upstream config quirks that trigger noisy Transformers 5.x warnings."""
+    w2v_config_path = model_dir / "hf_cache" / "w2v-bert-2.0" / "config.json"
+    if not w2v_config_path.exists():
+        return
+    try:
+        config = json.loads(w2v_config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug("读取语义前端配置失败，跳过兼容修正: {}", exc)
+        return
+
+    token_ids = [
+        int(value)
+        for key in ("pad_token_id", "bos_token_id", "eos_token_id")
+        if isinstance((value := config.get(key)), int)
+    ]
+    minimum_vocab_size = max(token_ids, default=-1) + 1
+    current_vocab_size = config.get("vocab_size")
+    if isinstance(current_vocab_size, int) and current_vocab_size >= minimum_vocab_size:
+        return
+
+    config["vocab_size"] = minimum_vocab_size
+    w2v_config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    logger.info(
+        "已修正语义前端配置中的 vocab_size 以兼容新版 Transformers: {} -> {}",
+        current_vocab_size,
+        minimum_vocab_size,
+    )
 
 
 @cache
@@ -190,10 +316,11 @@ class IndexTTSService:
     """Lightweight wrapper around indextts.infer_v2.IndexTTS2 for text-to-speech."""
 
     def __init__(self, model_dir: Path | None = None) -> None:
-        self.model_dir = model_dir or DEFAULT_INDEX_TTS_MODEL_DIR
+        self.model_dir = model_dir or resolve_index_tts_model_dir()
         self.device = resolve_tts_device()
         self._use_torch_compile = get_settings().experimental_torch_compile_enabled
         self._use_accel_gpt = get_settings().experimental_accel_gpt_enabled
+        self._warmup_text = _select_warmup_text(self.model_dir)
         self._tts: Any = None
         self._model_dir_str = str(self.model_dir)
         self._lock = threading.RLock()
@@ -214,11 +341,13 @@ class IndexTTSService:
             if not self.model_dir.exists():
                 raise FileNotFoundError(
                     "IndexTTS-2 model directory not found. Set INDEX_TTS_MODEL_DIR or place the model under "
-                    f"{DEFAULT_INDEX_TTS_MODEL_DIR}."
+                    f"{resolve_index_tts_model_dir()}."
                 )
             config_path = self.model_dir / "config.yaml"
             if not config_path.exists():
                 raise FileNotFoundError(f"IndexTTS-2 config not found: {config_path}")
+            _ensure_japanese_model_layout(self.model_dir)
+            _normalize_transformers_aux_configs(self.model_dir)
 
             use_accel = self._use_accel_gpt
             if use_accel:
@@ -275,12 +404,12 @@ class IndexTTSService:
                 except Exception as e:
                     logger.warning("TTS 参考音频预热失败: {}", e)
 
-                logger.info("正在预热 TTS 首段生成链路: {}", _FIRST_CHUNK_WARMUP_TEXT)
+                logger.info("正在预热 TTS 首段生成链路: {}", self._warmup_text)
                 warmup_stream = None
                 try:
                     warmup_stream = tts.infer(
                         spk_audio_prompt=reference_audio_path,
-                        text=_FIRST_CHUNK_WARMUP_TEXT,
+                        text=self._warmup_text,
                         output_path="",
                         verbose=False,
                         emo_vector=emo_vector,

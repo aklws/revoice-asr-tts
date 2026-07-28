@@ -30,8 +30,8 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 import transformers
 
-from indextts.gpt.transformers_generation_utils import GenerationMixin
-from indextts.gpt.transformers_modeling_utils import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
+from transformers.modeling_utils import PreTrainedModel
 try:
     from transformers.modeling_utils import SequenceSummary
 except ImportError:
@@ -50,7 +50,36 @@ from transformers.modeling_outputs import (
 )
 # from transformers.modeling_utils import PreTrainedModel, SequenceSummary
 
-from transformers.pytorch_utils import Conv1D, find_pruneable_heads_and_indices, prune_conv1d_layer
+from transformers.pytorch_utils import Conv1D
+try:
+    from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_conv1d_layer
+except ImportError:
+    def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+        mask = torch.ones(n_heads, head_size, dtype=torch.bool)
+        heads = set(heads) - already_pruned_heads
+        for head in heads:
+            head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+            if 0 <= head < n_heads:
+                mask[head] = False
+        index = torch.arange(n_heads * head_size, dtype=torch.long)[mask.view(-1)]
+        return heads, index
+
+    def prune_conv1d_layer(layer, index, dim=1):
+        index = index.to(layer.weight.device)
+        weight = layer.weight.index_select(dim, index).clone().detach()
+        if layer.bias is not None:
+            bias = layer.bias.clone().detach() if dim == 1 else layer.bias.index_select(0, index).clone().detach()
+        new_size = list(layer.weight.size())
+        new_size[dim] = len(index)
+        new_layer = Conv1D(new_size[1], new_size[0]).to(layer.weight.device)
+        new_layer.weight.requires_grad = False
+        new_layer.weight.copy_(weight.contiguous())
+        new_layer.weight.requires_grad = True
+        if layer.bias is not None:
+            new_layer.bias.requires_grad = False
+            new_layer.bias.copy_(bias.contiguous())
+            new_layer.bias.requires_grad = True
+        return new_layer
 from transformers.utils import (
     ModelOutput,
     add_code_sample_docstrings,
@@ -62,7 +91,20 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+try:
+    from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+except ImportError:
+    def get_device_map(num_layers, devices):
+        device_list = list(devices)
+        if not device_list:
+            device_list = [0]
+        return {device_list[0]: list(range(num_layers))}
+
+    def assert_device_map(device_map, num_layers):
+        assigned = sorted(layer for layers in device_map.values() for layer in layers)
+        expected = list(range(num_layers))
+        if assigned != expected:
+            raise ValueError(f"device_map must cover all layers exactly once: expected={expected}, got={assigned}")
 from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 
 
@@ -1029,7 +1071,14 @@ class GPT2Model(GPT2PreTrainedModel):
         if token_type_ids is not None:
             token_type_ids = token_type_ids.view(-1, input_shape[-1])
 
-        if past_key_values is None:
+        has_usable_past = (
+            past_key_values is not None
+            and len(past_key_values) > 0
+            and past_key_values[0] is not None
+            and len(past_key_values[0]) > 0
+            and past_key_values[0][0] is not None
+        )
+        if not has_usable_past:
             past_length = 0
             past_key_values = tuple([None] * len(self.h))
         else:
