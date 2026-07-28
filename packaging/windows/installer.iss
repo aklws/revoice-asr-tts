@@ -63,3 +63,6 @@ Name: "{app}\logs"
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\checkpoints"
 Type: filesandordirs; Name: "{app}\logs"
+Type: filesandordirs; Name: "{app}\.venv"
+Type: filesandordirs; Name: "{app}\vendor"
+Type: files; Name: "{app}\settings.json"
