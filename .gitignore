@@ -36,6 +36,7 @@ outputs/
 *.tmp
 *.bak
 settings.json
+docs/
 debug-*.md
 nuitka-crash-report*.xml
 docs/debug-*.md
