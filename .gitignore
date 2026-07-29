@@ -44,6 +44,8 @@ docs/debug-*.md
 checkpoints/
 asset/*
 !asset/Principle.png
+!asset/screenshots/
+!asset/screenshots/*.png
 scripts/
 
 # Build artifacts

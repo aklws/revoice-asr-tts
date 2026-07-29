@@ -47,6 +47,20 @@
 
 ![Revoice ASR-TTS Principle](./asset/Principle.png)
 
+## 界面预览
+
+主界面（初始化中）：
+
+![主界面-初始化中](./asset/screenshots/live-main-loading.png)
+
+主界面（就绪）：
+
+![主界面-就绪](./asset/screenshots/live-main-ready.png)
+
+快速设置与翻译节点：
+
+![快速设置与翻译节点](./asset/screenshots/quick-settings-translation.png)
+
 ## 环境要求
 
 - 操作系统：推荐 `Windows`

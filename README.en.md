@@ -47,6 +47,20 @@
 
 ![Revoice ASR-TTS Principle](./asset/Principle.png)
 
+## Screenshots
+
+Main window (initializing):
+
+![Main window initializing](./asset/screenshots/live-main-loading.png)
+
+Main window (ready):
+
+![Main window ready](./asset/screenshots/live-main-ready.png)
+
+Quick settings and translation nodes:
+
+![Quick settings and translation nodes](./asset/screenshots/quick-settings-translation.png)
+
 ## Requirements
 
 - OS: `Windows` recommended
