@@ -1,11 +1,8 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
-from typing import Optional
 import triton
 import triton.language as tl
-import flash_attn
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from torch import nn
 

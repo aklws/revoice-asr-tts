@@ -151,11 +151,7 @@ class GPT2AccelModel(GPT2Model):
             hidden_states = inputs_embeds
 
             for block in self.h:
-                block_output = block(hidden_states)
-                if isinstance(block_output, torch.Tensor):
-                    hidden_states = block_output
-                else:
-                    hidden_states = block_output[0]
+                hidden_states = block(hidden_states)[0]
 
             hidden_states = self.ln_f(hidden_states)
 

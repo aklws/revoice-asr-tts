@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Adapted from https://github.com/jik876/hifi-gan under the MIT license.
 #   LICENSE is in incl_licenses directory.
 
@@ -62,16 +64,16 @@ def get_padding(kernel_size, dilation=1):
 
 def load_checkpoint(filepath, device):
     assert os.path.isfile(filepath)
-    print(f"Loading '{filepath}'")
+    print_loguru(f"Loading '{filepath}'")
     checkpoint_dict = torch.load(filepath, map_location=device)
-    print("Complete.")
+    print_loguru("Complete.")
     return checkpoint_dict
 
 
 def save_checkpoint(filepath, obj):
-    print(f"Saving checkpoint to {filepath}")
+    print_loguru(f"Saving checkpoint to {filepath}")
     torch.save(obj, filepath)
-    print("Complete.")
+    print_loguru("Complete.")
 
 
 def scan_checkpoint(cp_dir, prefix, renamed_file=None):
@@ -81,14 +83,14 @@ def scan_checkpoint(cp_dir, prefix, renamed_file=None):
 
     if len(cp_list) > 0:
         last_checkpoint_path = sorted(cp_list)[-1]
-        print(f"[INFO] Resuming from checkpoint: '{last_checkpoint_path}'")
+        print_loguru(f"[INFO] Resuming from checkpoint: '{last_checkpoint_path}'")
         return last_checkpoint_path
 
     # If no pattern-based checkpoints are found, check for renamed file
     if renamed_file:
         renamed_path = os.path.join(cp_dir, renamed_file)
         if os.path.isfile(renamed_path):
-            print(f"[INFO] Resuming from renamed checkpoint: '{renamed_file}'")
+            print_loguru(f"[INFO] Resuming from renamed checkpoint: '{renamed_file}'")
             return renamed_path
 
     return None

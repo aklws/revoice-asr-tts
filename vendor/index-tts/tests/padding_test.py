@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import os
 import torch
 import torchaudio
@@ -57,7 +59,7 @@ if __name__ == "__main__":
         # baseline for non-pad
         baseline = tts.gpt.inference_speech(auto_conditioning, text_tokens, **kwargs)
         baseline = baseline.squeeze(0)
-        print("Inference padded text tokens...")
+        print_loguru("Inference padded text tokens...")
         pad_text_tokens = [
             F.pad(text_tokens, (8, 0), value=0), # left bos
             F.pad(text_tokens, (0, 8), value=1), # right eos
@@ -71,39 +73,39 @@ if __name__ == "__main__":
             out = tts.gpt.inference_speech(auto_conditioning, text_tokens, **kwargs)
             output_for_padded.append(out.squeeze(0))
         # batched inference
-        print("Inference padded text tokens as one batch...")
+        print_loguru("Inference padded text tokens as one batch...")
         batched_text_tokens = torch.cat(pad_text_tokens, dim=0).to(tts.device)
         assert len(pad_text_tokens) == batched_text_tokens.shape[0] and batched_text_tokens.ndim == 2
         batch_output = tts.gpt.inference_speech(auto_conditioning, batched_text_tokens, **kwargs)
         del pad_text_tokens
     mismatch_idx = []
-    print("baseline:", baseline.shape, baseline)
-    print("--"*10)
-    print("baseline vs padded output:")
+    print_loguru("baseline:", baseline.shape, baseline)
+    print_loguru("--"*10)
+    print_loguru("baseline vs padded output:")
     for i in range(len(output_for_padded)):
         if not baseline.equal(output_for_padded[i]):
             mismatch_idx.append(i)
     
     if len(mismatch_idx) > 0:
-        print("mismatch:", mismatch_idx)
+        print_loguru("mismatch:", mismatch_idx)
         for i in mismatch_idx:
-            print(f"[{i}]: {output_for_padded[i]}")
+            print_loguru(f"[{i}]: {output_for_padded[i]}")
     else:
-        print("all matched")
+        print_loguru("all matched")
     
     del output_for_padded
-    print("--"*10)
-    print("baseline vs batched output:")
+    print_loguru("--"*10)
+    print_loguru("baseline vs batched output:")
     mismatch_idx = []
     for i in range(batch_output.shape[0]):
         if not baseline.equal(batch_output[i]):
             mismatch_idx.append(i)
     if len(mismatch_idx) > 0:
-        print("mismatch:", mismatch_idx)
+        print_loguru("mismatch:", mismatch_idx)
         for i in mismatch_idx:
-            print(f"[{i}]: {batch_output[i]}")
+            print_loguru(f"[{i}]: {batch_output[i]}")
     
     else:
-        print("all matched")
+        print_loguru("all matched")
     
-    print("Test finished.")
+    print_loguru("Test finished.")

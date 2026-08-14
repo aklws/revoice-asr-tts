@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import os
 import sys
 import warnings
@@ -21,30 +23,30 @@ def _cmd_download(args):
 
     missing = [f for f in _REQUIRED_MODEL_FILES if not os.path.exists(os.path.join(model_dir, f))]
     if missing:
-        print(f">> Downloading IndexTTS model to {model_dir}...")
+        print_loguru(f">> Downloading IndexTTS model to {model_dir}...")
         from indextts.utils.model_download import snapshot_download
         snapshot_download(_MODEL_REPO, local_dir=model_dir)
 
         still_missing = [f for f in _REQUIRED_MODEL_FILES if not os.path.exists(os.path.join(model_dir, f))]
         if still_missing:
-            print(f"ERROR: Still missing after download: {', '.join(still_missing)}")
+            print_loguru(f"ERROR: Still missing after download: {', '.join(still_missing)}")
             sys.exit(1)
     else:
-        print(f">> Main model files already present in {model_dir}.")
+        print_loguru(f">> Main model files already present in {model_dir}.")
 
     from indextts.utils.model_download import ensure_config_available
     ensure_config_available(model_dir)
 
-    print(f">> IndexTTS models downloaded successfully.")
+    print_loguru(f">> IndexTTS models downloaded successfully.")
 
 
 def _cmd_infer(args):
     """Run TTS inference."""
     if len(args.text.strip()) == 0:
-        print("ERROR: Text is empty.")
+        print_loguru("ERROR: Text is empty.")
         sys.exit(1)
     if not os.path.exists(args.voice):
-        print(f"Audio prompt file {args.voice} does not exist.")
+        print_loguru(f"Audio prompt file {args.voice} does not exist.")
         sys.exit(1)
 
     requested_config = args.config
@@ -54,21 +56,21 @@ def _cmd_infer(args):
         try:
             ensure_config_available(config_dir)
         except Exception as e:
-            print(f"Failed to download config.yaml: {e}")
+            print_loguru(f"Failed to download config.yaml: {e}")
         downloaded_config = os.path.join(config_dir, "config.yaml")
         if os.path.exists(requested_config):
             args.config = requested_config
         elif os.path.exists(downloaded_config):
-            print(f"Config file {requested_config} does not exist. Using {downloaded_config} instead.")
+            print_loguru(f"Config file {requested_config} does not exist. Using {downloaded_config} instead.")
             args.config = downloaded_config
         else:
-            print(f"Config file {requested_config} does not exist.")
+            print_loguru(f"Config file {requested_config} does not exist.")
             sys.exit(1)
 
     output_path = args.output_path
     if os.path.exists(output_path):
         if not args.force:
-            print(f"ERROR: Output file {output_path} already exists. Use --force to overwrite.")
+            print_loguru(f"ERROR: Output file {output_path} already exists. Use --force to overwrite.")
             sys.exit(1)
         else:
             os.remove(output_path)
@@ -76,7 +78,7 @@ def _cmd_infer(args):
     try:
         import torch
     except ImportError:
-        print("ERROR: PyTorch is not installed. Please install it first.")
+        print_loguru("ERROR: PyTorch is not installed. Please install it first.")
         sys.exit(1)
 
     if args.device is None:
@@ -89,7 +91,7 @@ def _cmd_infer(args):
         else:
             args.device = "cpu"
             args.fp16 = False
-            print("WARNING: Running on CPU may be slow.")
+            print_loguru("WARNING: Running on CPU may be slow.")
 
     from indextts.infer import IndexTTS
     tts = IndexTTS(cfg_path=args.config, model_dir=args.model_dir, use_fp16=args.fp16, device=args.device)

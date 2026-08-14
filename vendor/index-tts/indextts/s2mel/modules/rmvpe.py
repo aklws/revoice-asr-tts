@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 from io import BytesIO
 import os
 from typing import List, Optional, Tuple
@@ -392,11 +394,11 @@ class E2E(nn.Module):
             )
 
     def forward(self, mel):
-        # print(mel.shape)
+        # print_loguru(mel.shape)
         mel = mel.transpose(-1, -2).unsqueeze(1)
         x = self.cnn(self.unet(mel)).transpose(1, 2).flatten(-2)
         x = self.fc(x)
-        # print(x.shape)
+        # print_loguru(x.shape)
         return x
 
 
@@ -553,13 +555,13 @@ class RMVPE:
         mel = self.mel_extractor(
             audio.float().to(self.device).unsqueeze(0), center=True
         )
-        # print(123123123,mel.device.type)
+        # print_loguru(123123123,mel.device.type)
         # torch.cuda.synchronize()
         # t1 = ttime()
         hidden = self.mel2hidden(mel)
         # torch.cuda.synchronize()
         # t2 = ttime()
-        # print(234234,hidden.device.type)
+        # print_loguru(234234,hidden.device.type)
         if "privateuseone" not in str(self.device):
             hidden = hidden.squeeze(0).cpu().numpy()
         else:
@@ -570,7 +572,7 @@ class RMVPE:
         f0 = self.decode(hidden, thred=thred)
         # torch.cuda.synchronize()
         # t3 = ttime()
-        # print("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
+        # print_loguru("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
         return f0
     def infer_from_audio_batch(self, audio, thred=0.03):
         # torch.cuda.synchronize()
@@ -580,13 +582,13 @@ class RMVPE:
         mel = self.mel_extractor(
             audio.float().to(self.device), center=True
         )
-        # print(123123123,mel.device.type)
+        # print_loguru(123123123,mel.device.type)
         # torch.cuda.synchronize()
         # t1 = ttime()
         hidden = self.mel2hidden(mel)
         # torch.cuda.synchronize()
         # t2 = ttime()
-        # print(234234,hidden.device.type)
+        # print_loguru(234234,hidden.device.type)
         if "privateuseone" not in str(self.device):
             hidden = hidden.cpu().numpy()
         else:
@@ -601,7 +603,7 @@ class RMVPE:
         f0s = torch.from_numpy(f0s).to(self.device)
         # torch.cuda.synchronize()
         # t3 = ttime()
-        # print("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
+        # print_loguru("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
         return f0s
 
     def to_local_average_cents(self, salience, thred=0.05):
@@ -627,5 +629,5 @@ class RMVPE:
         maxx = np.max(salience, axis=1)  # 帧长
         devided[maxx <= thred] = 0
         # t4 = ttime()
-        # print("decode:%s\t%s\t%s\t%s" % (t1 - t0, t2 - t1, t3 - t2, t4 - t3))
+        # print_loguru("decode:%s\t%s\t%s\t%s" % (t1 - t0, t2 - t1, t3 - t2, t4 - t3))
         return devided

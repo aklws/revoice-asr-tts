@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import torch
 
 
@@ -32,14 +34,14 @@ def show_device_list(backend: str) -> int:
             brand_name = "Apple MPS"
 
         if not backend_module.is_available():
-            print(f"PyTorch: No devices found for {brand_name} backend.")
+            print_loguru(f"PyTorch: No devices found for {brand_name} backend.")
             return 0
 
-        print(f"PyTorch: {brand_name} is available!")
+        print_loguru(f"PyTorch: {brand_name} is available!")
 
         # Show all available hardware acceleration devices.
         device_count = backend_module.device_count()
-        print(f"  * Number of {backend_upper} devices found: {device_count}")
+        print_loguru(f"  * Number of {backend_upper} devices found: {device_count}")
 
         # NOTE: Apple Silicon devices don't have `get_device_name()` at the
         # moment, so we'll skip those since we can't get their device names.
@@ -47,16 +49,16 @@ def show_device_list(backend: str) -> int:
         if backend != "mps":
             for i in range(device_count):
                 device_name = backend_module.get_device_name(i)
-                print(f'  * Device {i}: "{device_name}"')
+                print_loguru(f'  * Device {i}: "{device_name}"')
 
         return device_count
 
     except AttributeError:
-        print(
+        print_loguru(
             f'Error: The PyTorch backend "{backend}" does not exist, or is missing the necessary APIs (is_available, device_count, get_device_name).'
         )
     except Exception as e:
-        print(f"Error: {e}")
+        print_loguru(f"Error: {e}")
 
     return 0
 
@@ -67,7 +69,7 @@ def check_torch_devices() -> None:
     platforms and prints information about the discovered devices.
     """
 
-    print("Scanning for PyTorch hardware acceleration devices...\n")
+    print_loguru("Scanning for PyTorch hardware acceleration devices...\n")
 
     device_count = 0
 
@@ -76,9 +78,9 @@ def check_torch_devices() -> None:
     device_count += show_device_list("mps")  # Apple Metal Performance Shaders (MPS).
 
     if device_count > 0:
-        print("\nHardware acceleration detected. Your system is ready!")
+        print_loguru("\nHardware acceleration detected. Your system is ready!")
     else:
-        print("\nNo hardware acceleration detected. Running in CPU mode.")
+        print_loguru("\nNo hardware acceleration detected. Running in CPU mode.")
 
 
 if __name__ == "__main__":

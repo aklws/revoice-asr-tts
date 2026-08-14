@@ -2,9 +2,11 @@
 
 # Revoice ASR-TTS
 
-[English](./README.en.md)
+[简体中文](./README.md)
 
-`Revoice ASR-TTS` is a real-time voice changer desktop application for Windows, built on `PySide6`, `FunASR Nano`, `IndexTTS-2`, and an experimental `emotion2vec+` emotion recognition pipeline.
+`Revoice ASR-TTS` is a Windows real-time speech workstation built on `PySide6`, `FunASR Nano GGUF`, `IndexTTS-2.5`, `MeanVC2`, and an experimental `emotion2vec+` emotion recognition pipeline.
+
+![Live main interface screenshot](./asset/screenshots/live-main-histoiry.png)
 
 ## Project Overview
 
@@ -16,10 +18,12 @@
 
 ## Core Features
 
-- `FunASR Nano` for real-time speech recognition, defaulting to `AutoModel`
-- `IndexTTS-2` for streaming speech synthesis
+- `FunASR Nano GGUF` for real-time speech recognition
+- `IndexTTS-2.5` for multilingual streaming speech synthesis
+- `MeanVC2` for real-time voice conversion
 - `emotion2vec+` for experimental emotion recognition
 - Microphone, playback, and monitor devices can be configured separately
+- Supports microphone input, program capture, and dual-input mode
 - Supports reference audio warm-up to reduce first-sentence latency
 - Built-in duplicate ASR text suppression to prevent feeding the same sentence repeatedly to TTS
 
@@ -91,50 +95,51 @@ Additional runtime dependencies must be prepared manually:
 
 The following directories are used by default:
 
-- `checkpoints/IndexTTS-2`
+- `checkpoints/IndexTTS-2.5`
 - `checkpoints/emotion2vec_plus_base`
-- `checkpoints/Fun-ASR-Nano-2512`
-- `checkpoints/speech_campplus_sv_zh-cn_16k-common`
+- `checkpoints/Fun-ASR-Nano-2512-gguf`
+- `checkpoints/MeanVC2`
 
-The application will currently check and automatically prepare the following `IndexTTS-2` models at startup:
+The current default configuration is:
 
-- `IndexTeam/IndexTTS-2`
-- `xmccln/IndexTTS-2-Japanese`
+- Default `IndexTTS` repository: `IndexTeam/IndexTTS-2.5`
+- Default `ASR` repository: `aklwss/Fun-ASR-Nano-2512-gguf`
+- Default voice output model: `MeanVC2`
 
-The default repository in use is `IndexTeam/IndexTTS-2`. If you switch to another IndexTTS-2 repository without explicitly setting a directory, the program will automatically download the models to `checkpoints/<repo-name>`. For example, the Japanese model `xmccln/IndexTTS-2-Japanese` will default to `checkpoints/IndexTTS-2-Japanese`.
+The Settings page can manually download the following resources:
 
-The ASR model will automatically prepare `FunAudioLLM/Fun-ASR-Nano-2512` during the startup phase, defaulting to:
+- `IndexTeam/IndexTTS-2.5`
+- `aklwss/Fun-ASR-Nano-2512-gguf`
+- `aklwss/MeanVC2`
+- `iic/emotion2vec_plus_base`
 
-- `checkpoints/Fun-ASR-Nano-2512`
+Quick Settings in the top-right corner are now mainly used for:
 
-Speaker filtering in Live mode now defaults to using `iic/speech_campplus_sv_zh-cn_16k-common` to extract speaker embeddings, and the model will also be automatically prepared to:
+- Translation toggle and target language
+- Current voice output model (`Index-TTS` / `MeanVC2`)
+- Translation nodes and experimental options
 
-- `checkpoints/speech_campplus_sv_zh-cn_16k-common`
+Notes:
 
-
-
-You can now also modify the following directly within the app via "Quick Settings" in the top-right corner:
-
-- Current output language
-- TTS model list to check/download at startup
-
-Post-save behavior falls into two categories:
-
-- If the change alters the currently used `TTS` repository or modifies the pre-download model list, the app will prompt for a restart. Upon exit, it will re-check and automatically prepare models according to the new configuration on the next launch.
-- If only the current output language is changed without altering the underlying `TTS` repository, the app will not exit; if the microphone is active, it will automatically stop it to refresh the current settings.
+- `IndexTTS-2.5` now auto-detects `zh / en / ja` from the final text, so there is no separate "output language" control on the home page anymore
+- `MeanVC2` is a voice conversion model, does not rely on Index-TTS language switching, and does not support direct text synthesis
 
 To customize the download directory, it is recommended to specify it in `.env`:
 
 ```dotenv
-INDEX_TTS_MODEL_REPO=xmccln/IndexTTS-2-Japanese
-INDEX_TTS_MODEL_DIR=D:\models\IndexTTS-2-Japanese
+INDEX_TTS_MODEL_REPO=IndexTeam/IndexTTS-2.5
+INDEX_TTS_MODEL_DIR=D:\models\IndexTTS-2.5
+ASR_MODEL_REPO=aklwss/Fun-ASR-Nano-2512-gguf
+ASR_MODEL_DIR=D:\models\Fun-ASR-Nano-2512-gguf
 ```
 
 Or temporarily specify:
 
 ```powershell
-$env:INDEX_TTS_MODEL_REPO = "xmccln/IndexTTS-2-Japanese"
-$env:INDEX_TTS_MODEL_DIR = "D:\models\IndexTTS-2-Japanese"
+$env:INDEX_TTS_MODEL_REPO = "IndexTeam/IndexTTS-2.5"
+$env:INDEX_TTS_MODEL_DIR = "D:\models\IndexTTS-2.5"
+$env:ASR_MODEL_REPO = "aklwss/Fun-ASR-Nano-2512-gguf"
+$env:ASR_MODEL_DIR = "D:\models\Fun-ASR-Nano-2512-gguf"
 uv run python main.py
 ```
 
@@ -182,12 +187,13 @@ Notes:
 
 ## Usage Instructions
 
-### Microphone Mode
+### Live Mode
 
-1. Select reference audio
-2. Select recording, playback, and monitor devices
-3. Wait for models and reference voice warm-up to complete
-4. Click "Start Voice Changing"
+1. Choose the input source: microphone, program capture, or dual-input mode
+2. Select reference audio, recording, playback, and monitor devices
+3. If program capture is enabled, select the target process and make sure the PID list has been refreshed
+4. Wait for model loading and reference warm-up to complete
+5. Click "Start Voice Changing"
 
 ### Text Mode
 
@@ -196,16 +202,21 @@ Notes:
 3. Wait for the button on the right to switch from "Preparing" to "Start Synthesis"
 4. Begin streaming synthesis
 
+Notes:
+
+- Text mode currently supports `Index-TTS` only
+- `MeanVC2` is currently a real-time voice conversion model and does not support text mode
+
 ## Model Notes
 
 - Model existence is checked at startup
-- At startup, the program uniformly checks and automatically prepares `Fun-ASR-Nano-2512`, `speech_campplus_sv_zh-cn_16k-common`, all built-in available `IndexTTS-2` models, and `emotion2vec+`
-- The splash screen will detail the specific `IndexTTS-2` models and their associated resources currently being checked or downloaded
-- `IndexTTS-2` currently supports switching between repositories via `INDEX_TTS_MODEL_REPO`, such as third-party Japanese models
-- `Fun-ASR-Nano-2512` is automatically prepared via `ModelScope` by default, but can be switched to a local directory using environment variables
-- Voiceprint filtering in Live mode has been switched to the `CAMPPlus speaker verification` model, no longer relying on custom voiceprint extraction on the TTS side
+- The default `ASR` repository is `aklwss/Fun-ASR-Nano-2512-gguf`
+- The default `IndexTTS` repository is `IndexTeam/IndexTTS-2.5`
+- The Settings page can manually download `ASR`, `MeanVC2`, `IndexTTS-2.5`, and `emotion2vec+`
+- `IndexTTS-2.5` automatically detects Chinese, English, and Japanese from the final text
+- `MeanVC2` is better suited to live voice conversion, while `Index-TTS` is better suited to text-to-speech
 - The current public source repository does not include the `bin/` local runtime directory
-- In packaged environments, `ModelScope`-related modules are explicitly imported in the code to avoid registry missing issues
+- In packaged environments, the launcher runs `uv sync --frozen` before starting the app
 
 ## Known Notes
 
@@ -232,7 +243,7 @@ This repository aggregates multiple third-party models and dependencies. Please 
 }
 ```
 
-### IndexTTS-2
+### IndexTTS-2.5
 
 ```bibtex
 @article{zhou2025indextts2,
@@ -240,6 +251,17 @@ This repository aggregates multiple third-party models and dependencies. Please 
   author={Siyi Zhou, Yiquan Zhou, Yi He, Xun Zhou, Jinchao Wang, Wei Deng, Jingchen Shu},
   journal={arXiv preprint arXiv:2506.21619},
   year={2025}
+}
+```
+
+### MeanVC2
+
+```bibtex
+@article{ma2026meanvc2,
+  title={MeanVC2: Robust Low-Latency Streaming Zero-Shot Voice Conversion},
+  author={Ma, Guobin and Xia, Yuxuan and Jiang, Yuepeng and Guo, Dake and Xie, Hanke and Hu, Jingbin and Wang, Yanbo and Xie, Lei and Zhu, Pengcheng},
+  journal={arXiv preprint arXiv:2606.09050},
+  year={2026}
 }
 ```
 
@@ -259,4 +281,4 @@ This repository aggregates multiple third-party models and dependencies. Please 
 - Repository's own code defaults to the [MIT License](./LICENSE)
 - Third-party vendored code, binaries, models, and other non-original content are not covered by the root MIT license
 - If you distribute `bin/ffmpeg/` alongside the project, fulfill the corresponding obligations according to the license included in that directory; the current local example is a `GPL v3` build
-- For details, see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)
+- Third-party models, vendored source code, and binaries should be handled according to the licenses and upstream notices in their respective directories

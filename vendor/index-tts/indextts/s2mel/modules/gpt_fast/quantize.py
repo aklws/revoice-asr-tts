@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -255,7 +257,7 @@ class GPTQQuantHandler(QuantHandler):
         except:
             pass
         task_dict = get_task_dict(calibration_tasks)
-        print("Obtaining GPTQ calibration inputs on: ", calibration_tasks)
+        print_loguru("Obtaining GPTQ calibration inputs on: ", calibration_tasks)
 
         evaluate(
             input_recorder,
@@ -268,7 +270,7 @@ class GPTQQuantHandler(QuantHandler):
             f"use option pad_calibration_inputs, or decrease calibration_sequence_length (currently "+
             f"{calibration_seq_length})"
         )
-        print(f"Obtained {len(inputs[0].values)} calibration samples")
+        print_loguru(f"Obtained {len(inputs[0].values)} calibration samples")
         return inputs
 
     @torch.no_grad()
@@ -284,7 +286,7 @@ class GPTQQuantHandler(QuantHandler):
         pad_calibration_inputs,
     ) -> "StateDict":
         inputs = GPTQQuantHandler.get_inputs(self.mod, tokenizer, calibration_tasks, calibration_limit, calibration_seq_length, pad_calibration_inputs)
-        print("Tracing model for GPTQ")
+        print_loguru("Tracing model for GPTQ")
         GPTQ_runner = GenericGPTQRunner(
             self.mod,
             inputs,
@@ -300,7 +302,7 @@ class GPTQQuantHandler(QuantHandler):
             self.skip_layer_func
         )
 
-        print("Applying GPTQ to weights")
+        print_loguru("Applying GPTQ to weights")
         GPTQ_runner.run()
         return GPTQ_runner.get_quantized_state_dict()
 
@@ -416,18 +418,18 @@ class WeightOnlyInt4QuantHandler:
                 out_features = mod.out_features
                 in_features = mod.in_features
                 assert out_features % 8 == 0, "require out_features % 8 == 0"
-                print(f"linear: {fqn}, in={in_features}, out={out_features}")
+                print_loguru(f"linear: {fqn}, in={in_features}, out={out_features}")
 
                 weight = mod.weight.data
                 if not _check_linear_int4_k(in_features, self.groupsize, self.inner_k_tiles):
                     if self.padding:
                         from model import find_multiple
                         import torch.nn.functional as F
-                        print(f"warning: {fqn} is padded to satisfy in_features % 1024 == 0")
+                        print_loguru(f"warning: {fqn} is padded to satisfy in_features % 1024 == 0")
                         padded_in_features = find_multiple(in_features, 1024)
                         weight = F.pad(weight, pad=(0, padded_in_features - in_features))
                     else:
-                        print(f"warning: {fqn} is skipped, int4 requires that in_features is 32, 64, or is divisible by 1024, " +
+                        print_loguru(f"warning: {fqn} is skipped, int4 requires that in_features is 32, 64, or is divisible by 1024, " +
                             "and that groupsize and inner_k_tiles*16 evenly divide into it")
                         continue
                 weight_int4pack, scales_and_zeros = prepare_int4_weight_and_scales_and_zeros(
@@ -544,7 +546,7 @@ def quantize(
     device = 'cpu'
     precision = torch.bfloat16
 
-    print("Loading model ...")
+    print_loguru("Loading model ...")
     t0 = time.time()
 
     with torch.device('meta'):
@@ -555,7 +557,7 @@ def quantize(
     model = model.to(dtype=precision, device=device)
 
     if mode == 'int8':
-        print("Quantizing model weights for int8 weight-only symmetric per-channel quantization")
+        print_loguru("Quantizing model weights for int8 weight-only symmetric per-channel quantization")
         quant_handler = WeightOnlyInt8QuantHandler(model)
         quantized_state_dict = quant_handler.create_quantized_state_dict()
 
@@ -564,7 +566,7 @@ def quantize(
         new_base_name = base_name.replace('.pth', f'{label}int8.pth')
 
     elif mode == 'int4':
-        print("Quantizing model weights for int4 weight-only affine per-channel groupwise quantization")
+        print_loguru("Quantizing model weights for int4 weight-only affine per-channel groupwise quantization")
         quant_handler = WeightOnlyInt4QuantHandler(model, groupsize)
         quantized_state_dict = quant_handler.create_quantized_state_dict()
 
@@ -573,7 +575,7 @@ def quantize(
         new_base_name = base_name.replace('.pth', f"{label}int4.g{groupsize}.pth")
 
     elif mode == 'int4-gptq':
-        print("Quantizing model weights for int4 weight-only affine per-channel groupwise quantization using GPTQ...")
+        print_loguru("Quantizing model weights for int4 weight-only affine per-channel groupwise quantization using GPTQ...")
         quant_handler = WeightOnlyInt4GPTQQuantHandler(model, groupsize)
 
         tokenizer_path = checkpoint_path.parent / "tokenizer.model"
@@ -598,10 +600,10 @@ def quantize(
         raise ValueError(f"Invalid quantization mode {mode} needs to be one of [int8, int4, int4-gpptq]")
 
     quantize_path = dir_name / new_base_name
-    print(f"Writing quantized weights to {quantize_path}")
+    print_loguru(f"Writing quantized weights to {quantize_path}")
     quantize_path.unlink(missing_ok=True) # remove existing file if one already there
     torch.save(quantized_state_dict, quantize_path)
-    print(f"Quantization complete took {time.time() - t0:.02f} seconds")
+    print_loguru(f"Quantization complete took {time.time() - t0:.02f} seconds")
     return
 
 if __name__ == '__main__':

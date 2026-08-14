@@ -1,8 +1,10 @@
 # Revoice ASR-TTS
 
-[English](./README.en.md)
+[English](./README.en-US.md)
 
-`Revoice ASR-TTS` 是一个面向 Windows 的实时变声器桌面应用，基于 `PySide6`、`FunASR Nano`、`IndexTTS-2` 和实验性的 `emotion2vec+` 情感识别流程构建。
+`Revoice ASR-TTS` 是一个面向 Windows 的实时语音工作台，基于 `PySide6`、`FunASR Nano GGUF`、`IndexTTS-2.5`、`MeanVC2` 和实验性的 `emotion2vec+` 情感识别流程构建。
+
+![实时主界面截图](./asset/screenshots/live-main-histoiry.png)
 
 ## 项目简介
 
@@ -14,10 +16,12 @@
 
 ## 核心特性
 
-- `FunASR Nano` 用于实时语音识别，默认走 `AutoModel`
-- `IndexTTS-2` 用于流式语音合成
+- `FunASR Nano GGUF` 用于实时语音识别
+- `IndexTTS-2.5` 用于多语言流式语音合成
+- `MeanVC2` 用于实时语音转换
 - `emotion2vec+` 用于实验性情感识别
 - 麦克风、播放、耳返设备可分别配置
+- 支持麦克风、程序监听与双路输入
 - 支持参考音频预热，减少首句延迟
 - 内置重复 ASR 文本抑制，避免同一句连续送入 TTS
 
@@ -89,51 +93,51 @@ uv sync
 
 默认会使用以下目录：
 
-- `checkpoints/IndexTTS-2`
+- `checkpoints/IndexTTS-2.5`
 - `checkpoints/emotion2vec_plus_base`
-- `checkpoints/Fun-ASR-Nano-2512`
-- `checkpoints/speech_campplus_sv_zh-cn_16k-common`
+- `checkpoints/Fun-ASR-Nano-2512-gguf`
+- `checkpoints/MeanVC2`
 
-当前内置会在程序启动时统一检查并自动准备以下 `IndexTTS-2` 模型：
+当前默认配置为：
 
-- `IndexTeam/IndexTTS-2`
-- `xmccln/IndexTTS-2-Japanese`
+- `IndexTTS-2.5` 默认仓库：`IndexTeam/IndexTTS-2.5`
+- `ASR` 默认仓库：`aklwss/Fun-ASR-Nano-2512-gguf`
+- `语音输出模型` 默认值：`MeanVC2`
 
-默认当前使用的仓库为 `IndexTeam/IndexTTS-2`。如果切换到其他 IndexTTS-2 仓库而未显式设置目录，程序会自动把模型下载到 `checkpoints/<仓库名>`，例如日语模型 `xmccln/IndexTTS-2-Japanese` 会默认落到 `checkpoints/IndexTTS-2-Japanese`。
+设置页“模型下载”当前支持手动补齐以下资源：
 
-其中 ASR 默认会在启动阶段自动准备 `FunAudioLLM/Fun-ASR-Nano-2512`，默认落到：
+- `IndexTeam/IndexTTS-2.5`
+- `aklwss/Fun-ASR-Nano-2512-gguf`
+- `aklwss/MeanVC2`
+- `iic/emotion2vec_plus_base`
 
-- `checkpoints/Fun-ASR-Nano-2512`
+右上角快速设置现在主要用于调整：
 
-Live 模式的说话人筛选现在默认使用 `iic/speech_campplus_sv_zh-cn_16k-common` 提取 speaker embedding，模型也会自动准备到：
+- 翻译开关与翻译目标语言
+- 当前语音输出模型（`Index-TTS` / `MeanVC2`）
+- 翻译节点与实验选项
 
-- `checkpoints/speech_campplus_sv_zh-cn_16k-common`
+说明：
 
-
-
-
-现在也可以在程序内通过“右上角快速设置”直接修改：
-
-- 当前输出语言
-- 启动时要统一检查/下载的 `TTS` 模型清单
-
-保存后的行为分两类：
-
-- 如果修改导致当前使用的 `TTS` 仓库发生变化，或者修改了预下载模型清单，程序会提示需要重启，并在退出后于下次启动时按新配置重新检查和自动准备模型。
-- 如果只是修改当前输出语言，但底层 `TTS` 仓库没有变化，程序不会直接退出；如果此时麦克风正在运行，会自动关闭麦克风以刷新当前设置。
+- `IndexTTS-2.5` 已按文本内容自动判定 `zh / en / ja`，首页不再单独提供“输出语言”选项
+- `MeanVC2` 是语音转换模型，不依赖 `Index-TTS` 的语种切换，也不支持文本直出
 
 如需自定义落盘目录，也推荐写到 `.env`：
 
 ```dotenv
-INDEX_TTS_MODEL_REPO=xmccln/IndexTTS-2-Japanese
-INDEX_TTS_MODEL_DIR=D:\models\IndexTTS-2-Japanese
+INDEX_TTS_MODEL_REPO=IndexTeam/IndexTTS-2.5
+INDEX_TTS_MODEL_DIR=D:\models\IndexTTS-2.5
+ASR_MODEL_REPO=aklwss/Fun-ASR-Nano-2512-gguf
+ASR_MODEL_DIR=D:\models\Fun-ASR-Nano-2512-gguf
 ```
 
 或者临时指定：
 
 ```powershell
-$env:INDEX_TTS_MODEL_REPO = "xmccln/IndexTTS-2-Japanese"
-$env:INDEX_TTS_MODEL_DIR = "D:\models\IndexTTS-2-Japanese"
+$env:INDEX_TTS_MODEL_REPO = "IndexTeam/IndexTTS-2.5"
+$env:INDEX_TTS_MODEL_DIR = "D:\models\IndexTTS-2.5"
+$env:ASR_MODEL_REPO = "aklwss/Fun-ASR-Nano-2512-gguf"
+$env:ASR_MODEL_DIR = "D:\models\Fun-ASR-Nano-2512-gguf"
 uv run python main.py
 ```
 
@@ -181,12 +185,13 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1
 
 ## 使用说明
 
-### 麦克风模式
+### 实时模式
 
-1. 选择参考音频
-2. 选择录音、播放和耳返设备
-3. 等待模型和参考音色预热完成
-4. 点击“开始变声”
+1. 选择输入来源：麦克风、程序监听或双路输入
+2. 选择参考音频、录音、播放和耳返设备
+3. 如启用程序监听，先选择目标程序并确认 PID 已刷新
+4. 等待模型和参考音色预热完成
+5. 点击“开始变声”
 
 ### 文本模式
 
@@ -195,16 +200,21 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1
 3. 等待右侧按钮从“准备中”切换到“开始合成”
 4. 开始流式合成
 
+说明：
+
+- 文本模式当前仅支持 `Index-TTS`
+- `MeanVC2` 当前是实时语音转换模型，不支持文本模式
+
 ## 模型说明
 
 - 启动时会检查模型是否存在
-- 程序启动时会统一检查并自动准备 `Fun-ASR-Nano-2512`、`speech_campplus_sv_zh-cn_16k-common`、所有内置可用的 `IndexTTS-2` 模型，以及 `emotion2vec+`
-- 启动页会细化显示当前正在检查或下载的具体 `IndexTTS-2` 模型及其附属资源
-- `IndexTTS-2` 当前支持通过 `INDEX_TTS_MODEL_REPO` 切换不同仓库，例如第三方日语模型
-- `Fun-ASR-Nano-2512` 默认通过 `ModelScope` 自动准备，也可以通过环境变量切到本地目录
-- Live 模式的声纹过滤已切换到 `CAMPPlus speaker verification` 模型，不再依赖 TTS 侧的自定义声纹提取
+- 当前默认 `ASR` 仓库为 `aklwss/Fun-ASR-Nano-2512-gguf`
+- 当前默认 `IndexTTS` 仓库为 `IndexTeam/IndexTTS-2.5`
+- 设置页可手动下载 `ASR`、`MeanVC2`、`IndexTTS-2.5` 和 `emotion2vec+`
+- `IndexTTS-2.5` 会根据最终文本自动判定中、英、日语种
+- `MeanVC2` 为语音转换模型，适合实时变声；`Index-TTS` 更适合文本转语音
 - 当前公开源码仓库不包含 `bin/` 本地运行时目录
-- 打包环境下，`ModelScope` 相关模块会在代码中显式导入，以避免注册表缺失问题
+- Windows 打包产物中的启动脚本会先执行 `uv sync --frozen`，再启动程序
 
 ## 已知说明
 
@@ -231,7 +241,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1
 }
 ```
 
-### IndexTTS-2
+### IndexTTS-2.5
 
 ```bibtex
 @article{zhou2025indextts2,
@@ -239,6 +249,17 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1
   author={Siyi Zhou, Yiquan Zhou, Yi He, Xun Zhou, Jinchao Wang, Wei Deng, Jingchen Shu},
   journal={arXiv preprint arXiv:2506.21619},
   year={2025}
+}
+```
+
+### MeanVC2
+
+```bibtex
+@article{ma2026meanvc2,
+  title={MeanVC2: Robust Low-Latency Streaming Zero-Shot Voice Conversion},
+  author={Ma, Guobin and Xia, Yuxuan and Jiang, Yuepeng and Guo, Dake and Xie, Hanke and Hu, Jingbin and Wang, Yanbo and Xie, Lei and Zhu, Pengcheng},
+  journal={arXiv preprint arXiv:2606.09050},
+  year={2026}
 }
 ```
 
@@ -258,4 +279,4 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1
 - 仓库自有代码默认采用 [MIT License](./LICENSE)
 - 第三方 vendored 代码、二进制、模型与其他非自有内容不受根 MIT 许可证覆盖
 - 如果你随项目一起分发 `bin/ffmpeg/`，请按该目录内随附许可证履行相应义务；当前本地示例为 `GPL v3` build
-- 详细说明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)
+- 第三方模型、vendor 源码与二进制请分别按其各自目录中的许可证与上游说明处理

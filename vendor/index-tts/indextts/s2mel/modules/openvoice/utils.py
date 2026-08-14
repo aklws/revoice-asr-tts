@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import re
 import json
 import numpy as np
@@ -107,7 +109,7 @@ def split_segments_latin(text, min_len=10):
     new_sent = []
     count_len = 0
     for ind, sent in enumerate(segments):
-        # print(sent)
+        # print_loguru(sent)
         new_sent.append(sent)
         count_len += len(sent.split(" "))
         if count_len > min_len or ind == len(segments) - 1:

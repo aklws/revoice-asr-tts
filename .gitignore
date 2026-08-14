@@ -36,6 +36,7 @@ outputs/
 *.tmp
 *.bak
 settings.json
+models.json
 docs/
 debug-*.md
 nuitka-crash-report*.xml
@@ -56,3 +57,6 @@ dist/
 
 # App-specific local runtime binaries
 bin/
+
+# Local-only test files
+tests/

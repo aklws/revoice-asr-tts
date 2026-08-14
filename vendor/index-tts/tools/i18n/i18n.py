@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import json
 import locale
 import os
@@ -33,4 +35,4 @@ class I18nAuto:
 
 if __name__ == "__main__":
     i18n = I18nAuto(language='en_US')
-    print(i18n)
+    print_loguru(i18n)

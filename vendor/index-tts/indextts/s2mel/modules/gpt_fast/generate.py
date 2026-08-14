@@ -1,3 +1,6 @@
+from indextts.utils.loguru_print import print_loguru
+
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -19,7 +22,7 @@ def device_sync(device):
     elif ("cpu" in device) or ("mps" in device):
         pass
     else:
-        print(f"device={device} is not yet suppported")
+        print_loguru(f"device={device} is not yet suppported")
 
 
 torch._inductor.config.coordinate_descent_tuning = True
@@ -217,13 +220,13 @@ def _load_model(checkpoint_path, device, precision, use_tp):
         model = Transformer.from_name(checkpoint_path.parent.name)
 
     if "int8" in str(checkpoint_path):
-        print("Using int8 weight-only quantization!")
+        print_loguru("Using int8 weight-only quantization!")
         from quantize import WeightOnlyInt8QuantHandler
         simple_quantizer = WeightOnlyInt8QuantHandler(model)
         model = simple_quantizer.convert_for_runtime()
 
     if "int4" in str(checkpoint_path):
-        print("Using int4 weight-only quantization!")
+        print_loguru("Using int4 weight-only quantization!")
         path_comps = checkpoint_path.name.split(".")
         groupsize = int(path_comps[-2][1:])
         from quantize import WeightOnlyInt4QuantHandler
@@ -237,7 +240,7 @@ def _load_model(checkpoint_path, device, precision, use_tp):
 
     if use_tp:
         from tp import apply_tp
-        print("Applying tensor parallel to model ...")
+        print_loguru("Applying tensor parallel to model ...")
         apply_tp(model)
 
     model = model.to(device=device, dtype=precision)
@@ -288,12 +291,12 @@ def main(
             # only print on rank 0
             print = lambda *args, **kwargs: None
 
-    print(f"Using device={device}")
+    print_loguru(f"Using device={device}")
     precision = torch.bfloat16
     is_speculative = draft_checkpoint_path is not None
     is_chat = "chat" in str(checkpoint_path)
 
-    print("Loading model ...")
+    print_loguru("Loading model ...")
     t0 = time.time()
     model = _load_model(checkpoint_path, device, precision, use_tp)
 
@@ -303,7 +306,7 @@ def main(
         draft_model = None
 
     device_sync(device=device) # MKG
-    print(f"Time to load model: {time.time() - t0:.02f} seconds")
+    print_loguru(f"Time to load model: {time.time() - t0:.02f} seconds")
 
     tokenizer = get_tokenizer(tokenizer_path, checkpoint_path)
 
@@ -354,9 +357,9 @@ def main(
                 if x.item() == tokenizer.eos_id():
                     done_generating = True
                 if len(buffer) == 4 or done_generating:
-                    print(''.join(buffer), end='', flush=True)
+                    print_loguru(''.join(buffer), end='', flush=True)
                     buffer.clear()
-                # print(, end='', flush=True)
+                # print_loguru(, end='', flush=True)
         else:
             callback = lambda x : x
         t0 = time.perf_counter()
@@ -380,7 +383,7 @@ def main(
             )
             aggregate_metrics['accept_counts'].append(metrics['accept_counts'])
         if i == -1:
-            print(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
+            print_loguru(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
             continue
         if hasattr(prof, "export_chrome_trace"):
             if use_tp:
@@ -391,23 +394,23 @@ def main(
         t = time.perf_counter() - t0
 
         if not interactive:
-            print(tokenizer.decode(y.tolist()))
+            print_loguru(tokenizer.decode(y.tolist()))
         else:
-            print()
+            print_loguru()
         tokens_generated = y.size(0) - prompt_length
         tokens_sec = tokens_generated / t
         aggregate_metrics['tokens_per_sec'].append(tokens_sec)
-        print(f"Time for inference {i + 1}: {t:.02f} sec total, {tokens_sec:.02f} tokens/sec")
-        print(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")
-    print("==========")
+        print_loguru(f"Time for inference {i + 1}: {t:.02f} sec total, {tokens_sec:.02f} tokens/sec")
+        print_loguru(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")
+    print_loguru("==========")
     if is_speculative:
         counts_aggregated = [sum(i) for i in zip(*aggregate_metrics['accept_counts'])]
         acceptance_probs = [i/sum(counts_aggregated) for i in counts_aggregated]
-        print(f"Acceptance probs: {acceptance_probs}")
-        print(f"Mean Accepted: {sum([idx * i for idx, i in enumerate(counts_aggregated)])/sum(counts_aggregated)}")
+        print_loguru(f"Acceptance probs: {acceptance_probs}")
+        print_loguru(f"Mean Accepted: {sum([idx * i for idx, i in enumerate(counts_aggregated)])/sum(counts_aggregated)}")
 
-    print(f"Average tokens/sec: {torch.mean(torch.tensor(aggregate_metrics['tokens_per_sec'])).item():.2f}")
-    print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
+    print_loguru(f"Average tokens/sec: {torch.mean(torch.tensor(aggregate_metrics['tokens_per_sec'])).item():.2f}")
+    print_loguru(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
 
 if __name__ == '__main__':

@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2024 NVIDIA CORPORATION.
 #   Licensed under the MIT license.
 
@@ -429,7 +431,7 @@ class BigVGAN(
 
     def remove_weight_norm(self):
         try:
-            print("Removing weight norm...")
+            print_loguru("Removing weight norm...")
             for l in self.ups:
                 for l_i in l:
                     remove_weight_norm(l_i)
@@ -438,7 +440,7 @@ class BigVGAN(
             remove_weight_norm(self.conv_pre)
             remove_weight_norm(self.conv_post)
         except ValueError:
-            print("[INFO] Model already removed weight norm. Skipping!")
+            print_loguru("[INFO] Model already removed weight norm. Skipping!")
             pass
 
     # Additional methods for huggingface_hub support
@@ -473,7 +475,7 @@ class BigVGAN(
 
         # Download and load hyperparameters (h) used by BigVGAN
         if os.path.isdir(model_id):
-            print("Loading config.json from local directory")
+            print_loguru("Loading config.json from local directory")
             config_file = os.path.join(model_id, "config.json")
         else:
             config_file = hf_hub_download(
@@ -491,23 +493,23 @@ class BigVGAN(
 
         # instantiate BigVGAN using h
         if use_cuda_kernel:
-            print(
+            print_loguru(
                 f"[WARNING] You have specified use_cuda_kernel=True during BigVGAN.from_pretrained(). Only inference is supported (training is not implemented)!"
             )
-            print(
+            print_loguru(
                 f"[WARNING] You need nvcc and ninja installed in your system that matches your PyTorch build is using to build the kernel. If not, the model will fail to initialize or generate incorrect waveform!"
             )
-            print(
+            print_loguru(
                 f"[WARNING] For detail, see the official GitHub repository: https://github.com/NVIDIA/BigVGAN?tab=readme-ov-file#using-custom-cuda-kernel-for-synthesis"
             )
         model = cls(h, use_cuda_kernel=use_cuda_kernel)
 
         # Download and load pretrained generator weight
         if os.path.isdir(model_id):
-            print("Loading weights from local directory")
+            print_loguru("Loading weights from local directory")
             model_file = os.path.join(model_id, "bigvgan_generator.pt")
         else:
-            print(f"Loading weights from {model_id}")
+            print_loguru(f"Loading weights from {model_id}")
             model_file = hf_hub_download(
                 repo_id=model_id,
                 filename="bigvgan_generator.pt",
@@ -525,7 +527,7 @@ class BigVGAN(
         try:
             model.load_state_dict(checkpoint_dict["generator"])
         except RuntimeError:
-            print(
+            print_loguru(
                 f"[INFO] the pretrained checkpoint does not contain weight norm. Loading the checkpoint after removing weight norm!"
             )
             model.remove_weight_norm()

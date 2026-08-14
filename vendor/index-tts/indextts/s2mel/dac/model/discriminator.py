@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -222,7 +224,7 @@ if __name__ == "__main__":
     x = torch.zeros(1, 1, 44100)
     results = disc(x)
     for i, result in enumerate(results):
-        print(f"disc{i}")
+        print_loguru(f"disc{i}")
         for i, r in enumerate(result):
-            print(r.shape, r.mean(), r.min(), r.max())
-        print()
+            print_loguru(r.shape, r.mean(), r.min(), r.max())
+        print_loguru()

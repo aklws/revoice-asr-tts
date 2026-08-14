@@ -1,4 +1,6 @@
 #coding:utf-8
+from indextts.utils.loguru_print import print_loguru
+
 import os, sys
 import os.path as osp
 import numpy as np
@@ -30,14 +32,14 @@ class MultiOptimizer:
             try:
                 self.optimizers[key].load_state_dict(val)
             except:
-                print("Unloaded %s" % key)
+                print_loguru("Unloaded %s" % key)
 
     def load_scheduler_state_dict(self, state_dict):
         for key, val in state_dict:
             try:
                 self.schedulers[key].load_state_dict(val)
             except:
-                print("Unloaded %s" % key)
+                print_loguru("Unloaded %s" % key)
 
     def step(self, key=None, scaler=None):
         keys = [key] if key is not None else self.keys

@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2024 NVIDIA CORPORATION.
 #   Licensed under the MIT license.
 
@@ -30,7 +32,7 @@ def chinese_path_compile_support(sources, buildpath):
     os.makedirs(ninja_compile_dir, exist_ok=True)
     new_buildpath = os.path.join(ninja_compile_dir, "build")
     os.makedirs(new_buildpath, exist_ok=True)
-    print(f"ninja_buildpath: {new_buildpath}")
+    print_loguru(f"ninja_buildpath: {new_buildpath}")
     # Copy files to directory
     sources.clear()
     current_dir = os.path.dirname(__file__)
@@ -79,7 +81,6 @@ def load():
         )
 
     extra_cuda_flags = [
-        "-allow-unsupported-compiler",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "--expt-relaxed-constexpr",
@@ -119,4 +120,4 @@ def _create_build_dir(buildpath):
         os.mkdir(buildpath)
     except OSError:
         if not os.path.isdir(buildpath):
-            print(f"Creation of the build directory {buildpath} failed")
+            print_loguru(f"Creation of the build directory {buildpath} failed")

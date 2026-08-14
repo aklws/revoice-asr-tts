@@ -1,16 +1,15 @@
 [project]
 name = "revoice-asr-tts"
-version = "0.0.6"
-description = "Real-time Voice Assistant powered by FunASR Nano and IndexTTS-2"
+version = "0.1.0"
+description = "Real-time Voice Assistant powered by FunASR Nano and IndexTTS-2.5"
 readme = "README.md"
 requires-python = "==3.13.12"
 dependencies = [
     "addict>=2.4.0",
     "funasr",
-    "indextts",
     "loguru>=0.7.3",
     "ninja>=1.13.0",
-    "protobuf",
+    "protobuf>=6.31.1,<8",
     "PySide6>=6.9.1",
     "safetensors>=0.5.0",
     "sentencepiece>=0.2.1",
@@ -22,17 +21,20 @@ dependencies = [
     "torchaudio==2.11.0",
     "torchcodec>=0.14.0",
     "torchvision==0.26.0",
-    "transformers>=4.51,<5",
+    "transformers==4.52.1",
+    "tokenizers==0.21.0",
+    "openai-whisper>=20231117",
     "omegaconf",
     "librosa",
-    "modelscope",
+    "modelscope==1.38.1",
     "munch==4.0.0",
     "matplotlib>=3.8.0",
     "tqdm",
-    "accelerate",
+    "accelerate==1.8.1",
     "cn2an",
     "cython",
-    "datasets",
+    "descript-audiotools==0.7.2",
+    "datasets>=2.21,<3",
     "einops",
     "ffmpeg-python",
     "g2p-en",
@@ -45,6 +47,7 @@ dependencies = [
     "numpy",
     "opencv-python",
     "pandas",
+    "scipy",
     "tensorboard",
     "textstat",
     "torch-complex",
@@ -52,9 +55,7 @@ dependencies = [
     "requests",
     "wetext; sys_platform != 'linux'",
     "WeTextProcessing; sys_platform == 'linux'",
-    "onnxruntime>=1.26.0",
     "gguf>=0.19.0",
-    "llama-cpp-python>=0.3.31",
     "srt>=3.5.3",
     "triton-windows==3.6.0.post26; sys_platform == 'win32'",
     "flash-attn; sys_platform == 'win32'",
@@ -62,20 +63,37 @@ dependencies = [
     "gradio>=6.17.3",
     "pydub>=0.25.1",
     "python-dotenv>=1.1.1",
+    "pywin32>=311; sys_platform == 'win32'",
+    "process-audio-capture>=1.0.0; sys_platform == 'win32'",
+    "proc-tap>=1.1.1; sys_platform == 'win32'",
+    "onnxruntime-gpu>=1.28.0",
+    "pyarrow>=20,<21",
+    "pypinyin>=0.55.0",
+    "deepl>=1.22.0",
+    "google-cloud-translate>=3.17.0",
+    "x-transformers==2.2.11",
+    "s3prl>=0.4",
+    "fugashi>=1.2.0",
+    "unidic-lite>=1.0.0",
 ]
 
 
 [tool.uv]
 package = false
+override-dependencies = ["protobuf>=6.31.1,<8"]
 
 
 [tool.uv.sources]
-indextts = { path = "vendor/index-tts", editable = true }
 torch = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 flash-attn = { path = "bin/flash_attn/flash_attn-2.8.3+cu128torch2.11-cp313-cp313-win_amd64.whl" }
 
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

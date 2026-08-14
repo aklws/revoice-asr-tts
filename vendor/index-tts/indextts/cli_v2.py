@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import argparse
 import contextlib
 import importlib
@@ -48,6 +50,8 @@ PERSISTED_CONFIG_KEYS = (
     "use_fp16",
     "use_deepspeed",
     "use_cuda_kernel",
+    "use_accel",
+    "use_torch_compile",
 )
 
 
@@ -126,9 +130,9 @@ def _build_parser():
     )
     download.add_argument(
         "--source",
-        choices=("modelscope",),
-        default="modelscope",
-        help="Model download source (fixed: modelscope)",
+        choices=("huggingface", "modelscope", "auto"),
+        default="auto",
+        help="Model download source (default: auto-detect based on network)",
     )
     download.add_argument(
         "--model-dir",
@@ -190,6 +194,8 @@ def _build_parser():
     batch.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None, help="Use FP16 inference")
     batch.add_argument("--deepspeed", action=argparse.BooleanOptionalAction, default=None, help="Use DeepSpeed")
     batch.add_argument("--cuda-kernel", action=argparse.BooleanOptionalAction, default=None, help="Use CUDA kernel")
+    batch.add_argument("--accel", action=argparse.BooleanOptionalAction, default=None, help="Use GPT2 acceleration engine")
+    batch.add_argument("--torch-compile", action=argparse.BooleanOptionalAction, default=None, help="Use torch.compile for s2mel optimization")
     batch.add_argument("--verbose", action="store_true", help="Show verbose inference output")
     batch.add_argument("--voice", help="Default speaker reference audio for every batch task")
     batch.add_argument("--emotion-audio", help="Default emotion reference audio for every batch task")
@@ -243,6 +249,8 @@ def _build_parser():
     synth.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None, help="Use FP16 inference")
     synth.add_argument("--deepspeed", action=argparse.BooleanOptionalAction, default=None, help="Use DeepSpeed")
     synth.add_argument("--cuda-kernel", action=argparse.BooleanOptionalAction, default=None, help="Use CUDA kernel")
+    synth.add_argument("--accel", action=argparse.BooleanOptionalAction, default=None, help="Use GPT2 acceleration engine")
+    synth.add_argument("--torch-compile", action=argparse.BooleanOptionalAction, default=None, help="Use torch.compile for s2mel optimization")
     synth.add_argument("--verbose", action="store_true", help="Show verbose inference output")
     return parser
 
@@ -254,17 +262,17 @@ def _run_init(args):
     elif not config.get("model_dir"):
         config["model_dir"] = _default_model_dir().as_posix()
     _ensure_user_state(config)
-    print(f"Config: {_config_path()}")
-    print(f"Model directory: {Path(config['model_dir'])}")
+    print_loguru(f"Config: {_config_path()}")
+    print_loguru(f"Model directory: {Path(config['model_dir'])}")
     return EXIT_SUCCESS
 
 
 def _run_config(args):
     if args.config_command == "path":
-        print(_config_path())
+        print_loguru(_config_path())
         return EXIT_SUCCESS
     if args.config_command == "get":
-        print(_format_persisted_config(_load_persisted_config()), end="")
+        print_loguru(_format_persisted_config(_load_persisted_config()), end="")
         return EXIT_SUCCESS
     if args.config_command == "set":
         config = _load_persisted_config()
@@ -273,25 +281,25 @@ def _run_config(args):
             config[args.key] = value
             _config_path().parent.mkdir(parents=True, exist_ok=True)
             _save_persisted_config(config)
-            print(f"{args.key} = {Path(value)}")
+            print_loguru(f"{args.key} = {Path(value)}")
             return EXIT_SUCCESS
         if args.key == "default_device":
             config[args.key] = args.value
             _config_path().parent.mkdir(parents=True, exist_ok=True)
             _save_persisted_config(config)
-            print(f"{args.key} = {args.value}")
+            print_loguru(f"{args.key} = {args.value}")
             return EXIT_SUCCESS
-        if args.key in {"use_fp16", "use_deepspeed", "use_cuda_kernel"}:
+        if args.key in {"use_fp16", "use_deepspeed", "use_cuda_kernel", "use_accel", "use_torch_compile"}:
             value = _parse_config_bool(args.value)
             if value is None:
-                print(f"ERROR: {args.key} must be true or false", file=sys.stderr)
+                print_loguru(f"ERROR: {args.key} must be true or false", file=sys.stderr)
                 return EXIT_INPUT_ERROR
             config[args.key] = value
             _config_path().parent.mkdir(parents=True, exist_ok=True)
             _save_persisted_config(config)
-            print(f"{args.key} = {str(value).lower()}")
+            print_loguru(f"{args.key} = {str(value).lower()}")
             return EXIT_SUCCESS
-    print("ERROR: config requires a subcommand: path, get or set", file=sys.stderr)
+    print_loguru("ERROR: config requires a subcommand: path, get or set", file=sys.stderr)
     return EXIT_INPUT_ERROR
 
 
@@ -301,8 +309,8 @@ def _run_download(args):
     try:
         _download_model_resources(args.source, model_dir)
     except (ImportError, OSError) as exc:
-        print(f"ERROR: runtime unavailable for {args.source} download source: {exc}", file=sys.stderr)
-        print(f"Install download support with: pip install {_download_support_package(args.source)}", file=sys.stderr)
+        print_loguru(f"ERROR: runtime unavailable for {args.source} download source: {exc}", file=sys.stderr)
+        print_loguru(f"Install download support with: pip install {_download_support_package(args.source)}", file=sys.stderr)
         return EXIT_RUNTIME_UNAVAILABLE
 
     missing_exit_code = _report_missing_model_resources(model_dir)
@@ -315,16 +323,20 @@ def _run_download(args):
         _config_path().parent.mkdir(parents=True, exist_ok=True)
         _save_persisted_config(config)
 
-    print(f"Downloaded model resources to: {model_dir}")
+    print_loguru(f"Downloaded model resources to: {model_dir}")
     return EXIT_SUCCESS
 
 
 def _download_model_resources(source, model_dir):
-    if source == "modelscope":
+    if source == "auto":
+        from indextts.utils.model_download import snapshot_download
+        snapshot_download(MODEL_REPO_ID, local_dir=str(model_dir))
+    elif source == "modelscope":
         from indextts.utils.model_download import _snapshot_from_modelscope
         _snapshot_from_modelscope(MODEL_REPO_ID, str(model_dir))
     else:
-        raise ValueError(f"Unsupported download source: {source}")
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo_id=MODEL_REPO_ID, local_dir=str(model_dir))
 
     if _missing_primary_model_resources(model_dir):
         return
@@ -335,6 +347,10 @@ def _download_model_resources(source, model_dir):
 
 
 def _download_support_package(source):
+    if source == "auto":
+        return "huggingface_hub modelscope"
+    if source == "huggingface":
+        return "huggingface_hub"
     return "modelscope"
 
 
@@ -369,7 +385,36 @@ def _resolve_runtime_options(args):
         cuda_kernel=args.cuda_kernel
         if args.cuda_kernel is not None
         else bool(config.get("use_cuda_kernel", False)),
+        accel=args.accel if args.accel is not None else bool(config.get("use_accel", False)),
+        torch_compile=args.torch_compile
+        if args.torch_compile is not None
+        else bool(config.get("use_torch_compile", False)),
     )
+
+
+def _validate_optional_dependencies(runtime):
+    """Fail fast when acceleration flags are set but optional dependencies are missing."""
+    if runtime.accel:
+        try:
+            importlib.import_module("flash_attn")
+        except ImportError:
+            print_loguru(
+                "ERROR: --accel requires flash-attn, which is not installed. "
+                "Install it with: uv sync --extra accel",
+                file=sys.stderr,
+            )
+            return EXIT_RUNTIME_UNAVAILABLE
+    if runtime.torch_compile:
+        try:
+            importlib.import_module("triton")
+        except ImportError:
+            print_loguru(
+                "ERROR: --torch-compile requires triton, which is not installed. "
+                "Install it with: uv sync --extra torch_compile",
+                file=sys.stderr,
+            )
+            return EXIT_RUNTIME_UNAVAILABLE
+    return None
 
 
 def _load_persisted_config():
@@ -459,51 +504,51 @@ def _default_model_dir():
 
 def _run_synth(args, tts_factory=None, stdin=None):
     if _text_source_count(args) != 1:
-        print("ERROR: provide exactly one text source: --text, --text-file or --stdin", file=sys.stderr)
+        print_loguru("ERROR: provide exactly one text source: --text, --text-file or --stdin", file=sys.stderr)
         return EXIT_INPUT_ERROR
     if args.text_file and not Path(args.text_file).is_file():
-        print(f"ERROR: text file does not exist: {args.text_file}", file=sys.stderr)
+        print_loguru(f"ERROR: text file does not exist: {args.text_file}", file=sys.stderr)
         return EXIT_MISSING_RESOURCE
     text = _read_synth_text(args, stdin)
     if not text:
-        print("ERROR: text is empty", file=sys.stderr)
+        print_loguru("ERROR: text is empty", file=sys.stderr)
         return EXIT_INPUT_ERROR
     if not args.voice:
-        print("ERROR: --voice is required", file=sys.stderr)
+        print_loguru("ERROR: --voice is required", file=sys.stderr)
         return EXIT_MISSING_RESOURCE
     voice_path = Path(args.voice)
     if not voice_path.is_file():
-        print(f"ERROR: voice reference audio does not exist: {voice_path}", file=sys.stderr)
+        print_loguru(f"ERROR: voice reference audio does not exist: {voice_path}", file=sys.stderr)
         return EXIT_MISSING_RESOURCE
     emotion_conflict_error = _emotion_conflict_error(args)
     if emotion_conflict_error is not None:
-        print(emotion_conflict_error, file=sys.stderr)
+        print_loguru(emotion_conflict_error, file=sys.stderr)
         return EXIT_INPUT_ERROR
     emotion_vector = None
     if args.emotion_vector is not None:
         try:
             emotion_vector = _parse_emotion_vector(args.emotion_vector)
         except InputValidationError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
+            print_loguru(f"ERROR: {exc}", file=sys.stderr)
             return EXIT_INPUT_ERROR
     if args.emotion_text is not None and not args.emotion_text.strip():
-        print("ERROR: --emotion-text must not be empty", file=sys.stderr)
+        print_loguru("ERROR: --emotion-text must not be empty", file=sys.stderr)
         return EXIT_INPUT_ERROR
     emotion_path = Path(args.emotion_audio) if args.emotion_audio is not None else None
     if emotion_path is not None and not emotion_path.is_file():
-        print(f"ERROR: emotion reference audio does not exist: {emotion_path}", file=sys.stderr)
+        print_loguru(f"ERROR: emotion reference audio does not exist: {emotion_path}", file=sys.stderr)
         return EXIT_MISSING_RESOURCE
     try:
         emotion_weight = float(args.emotion_weight)
     except ValueError:
-        print(f"ERROR: --emotion-weight must be a float: {args.emotion_weight}", file=sys.stderr)
+        print_loguru(f"ERROR: --emotion-weight must be a float: {args.emotion_weight}", file=sys.stderr)
         return EXIT_INPUT_ERROR
     if not args.output:
-        print("ERROR: --output is required", file=sys.stderr)
+        print_loguru("ERROR: --output is required", file=sys.stderr)
         return EXIT_INPUT_ERROR
     output_path = Path(args.output)
     if output_path.exists() and not args.force:
-        print(f"ERROR: output file already exists: {output_path}", file=sys.stderr)
+        print_loguru(f"ERROR: output file already exists: {output_path}", file=sys.stderr)
         return EXIT_INPUT_ERROR
     _ensure_user_state()
     model_dir = _resolve_model_dir(args.model_dir)
@@ -512,11 +557,14 @@ def _run_synth(args, tts_factory=None, stdin=None):
     if missing_exit_code is not None:
         return EXIT_MISSING_RESOURCE
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    missing_dep_exit = _validate_optional_dependencies(runtime)
+    if missing_dep_exit is not None:
+        return missing_dep_exit
     if tts_factory is None:
         try:
             tts_factory = _load_indextts2(model_dir)
         except (ImportError, OSError) as exc:
-            print(f"ERROR: runtime unavailable: {exc}", file=sys.stderr)
+            print_loguru(f"ERROR: runtime unavailable: {exc}", file=sys.stderr)
             return EXIT_RUNTIME_UNAVAILABLE
     try:
         with _synth_stdout_context(args.verbose):
@@ -527,6 +575,8 @@ def _run_synth(args, tts_factory=None, stdin=None):
                 device=runtime.device,
                 use_cuda_kernel=runtime.cuda_kernel,
                 use_deepspeed=runtime.deepspeed,
+                use_accel=runtime.accel,
+                use_torch_compile=runtime.torch_compile,
             )
             infer_kwargs = {
                 "spk_audio_prompt": str(voice_path),
@@ -548,9 +598,9 @@ def _run_synth(args, tts_factory=None, stdin=None):
                 **infer_kwargs,
             )
     except Exception as exc:
-        print(f"ERROR: inference failed: {exc}", file=sys.stderr)
+        print_loguru(f"ERROR: inference failed: {exc}", file=sys.stderr)
         return EXIT_INFERENCE_ERROR
-    print(f"Generated: {output_path}")
+    print_loguru(f"Generated: {output_path}")
     return EXIT_SUCCESS
 
 
@@ -565,7 +615,7 @@ def _run_batch(args, tts_factory=None):
             output_config=output_config,
         )
     except BatchFileError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print_loguru(f"ERROR: {exc}", file=sys.stderr)
         return exc.exit_code
 
     _ensure_user_state()
@@ -576,15 +626,18 @@ def _run_batch(args, tts_factory=None):
         return EXIT_MISSING_RESOURCE
     if args.dry_run:
         if output_config["mode"] == "concat":
-            print(f"Batch concat OK: {len(tasks)} tasks")
+            print_loguru(f"Batch concat OK: {len(tasks)} tasks")
         else:
-            print(f"Batch file OK: {len(tasks)} tasks")
+            print_loguru(f"Batch file OK: {len(tasks)} tasks")
         return EXIT_SUCCESS
+    missing_dep_exit = _validate_optional_dependencies(runtime)
+    if missing_dep_exit is not None:
+        return missing_dep_exit
     if tts_factory is None:
         try:
             tts_factory = _load_indextts2(model_dir)
         except (ImportError, OSError) as exc:
-            print(f"ERROR: runtime unavailable: {exc}", file=sys.stderr)
+            print_loguru(f"ERROR: runtime unavailable: {exc}", file=sys.stderr)
             return EXIT_RUNTIME_UNAVAILABLE
     verbose = getattr(args, "verbose", False)
     try:
@@ -596,9 +649,11 @@ def _run_batch(args, tts_factory=None):
                 device=runtime.device,
                 use_cuda_kernel=runtime.cuda_kernel,
                 use_deepspeed=runtime.deepspeed,
+                use_accel=runtime.accel,
+                use_torch_compile=runtime.torch_compile,
             )
     except Exception as exc:
-        print(f"ERROR: inference failed: {exc}", file=sys.stderr)
+        print_loguru(f"ERROR: inference failed: {exc}", file=sys.stderr)
         return EXIT_INFERENCE_ERROR
 
     if output_config["mode"] == "concat":
@@ -618,10 +673,10 @@ def _run_batch(args, tts_factory=None):
                 infer_kwargs.update(task["emotion_kwargs"])
                 tts.infer(**infer_kwargs)
         except Exception as exc:
-            print(f"ERROR: batch file line {task['line_number']} inference failed: {exc}", file=sys.stderr)
+            print_loguru(f"ERROR: batch file line {task['line_number']} inference failed: {exc}", file=sys.stderr)
             return EXIT_INFERENCE_ERROR
-        print(f"Generated: {output_path}")
-    print(f"Batch complete: {len(tasks)} tasks generated")
+        print_loguru(f"Generated: {output_path}")
+    print_loguru(f"Batch complete: {len(tasks)} tasks generated")
     return EXIT_SUCCESS
 
 
@@ -646,20 +701,20 @@ def _run_batch_concat(args, tasks, tts, verbose, output_path):
                     infer_kwargs.update(task["emotion_kwargs"])
                     tts.infer(**infer_kwargs)
             except Exception as exc:
-                print(f"ERROR: batch file line {task['line_number']} inference failed: {exc}", file=sys.stderr)
+                print_loguru(f"ERROR: batch file line {task['line_number']} inference failed: {exc}", file=sys.stderr)
                 _handle_batch_concat_temp_dir_after_failure(temp_dir, keep_temp=args.keep_temp)
                 return EXIT_INFERENCE_ERROR
             try:
                 audio_format = _read_concat_wav_format(segment_path, task["line_number"])
             except ConcatFileError as exc:
-                print(f"ERROR: batch file line {task['line_number']} inference failed: {exc}", file=sys.stderr)
+                print_loguru(f"ERROR: batch file line {task['line_number']} inference failed: {exc}", file=sys.stderr)
                 _handle_batch_concat_temp_dir_after_failure(temp_dir, keep_temp=args.keep_temp)
                 return EXIT_INFERENCE_ERROR
             if expected_format is None:
                 expected_format = audio_format
                 expected_format_line = task["line_number"]
             elif audio_format != expected_format:
-                print(
+                print_loguru(
                     f"ERROR: batch file line {task['line_number']} inference failed: "
                     f"generated WAV format does not match baseline line {expected_format_line}",
                     file=sys.stderr,
@@ -677,23 +732,23 @@ def _run_batch_concat(args, tasks, tts, verbose, output_path):
         try:
             _concatenate_wav_segments(segments, output_path)
         except ConcatExecutionError as exc:
-            print(f"ERROR: concat failed: {exc}", file=sys.stderr)
+            print_loguru(f"ERROR: concat failed: {exc}", file=sys.stderr)
             if exc.cleanup_error is not None:
-                print(f"WARNING: cleanup failed: {exc.cleanup_error}", file=sys.stderr)
+                print_loguru(f"WARNING: cleanup failed: {exc.cleanup_error}", file=sys.stderr)
             _handle_batch_concat_temp_dir_after_failure(temp_dir, keep_temp=args.keep_temp)
             return EXIT_INFERENCE_ERROR
         if args.keep_temp:
-            print(f"Generated: {output_path}")
-            print(f"Temp dir: {temp_dir}")
+            print_loguru(f"Generated: {output_path}")
+            print_loguru(f"Temp dir: {temp_dir}")
         else:
             cleanup_error = _cleanup_batch_concat_temp_dir(temp_dir)
             if cleanup_error is not None:
-                print(f"ERROR: cleanup failed: {cleanup_error}", file=sys.stderr)
+                print_loguru(f"ERROR: cleanup failed: {cleanup_error}", file=sys.stderr)
                 return EXIT_INFERENCE_ERROR
-            print(f"Generated: {output_path}")
+            print_loguru(f"Generated: {output_path}")
         return EXIT_SUCCESS
     except Exception as exc:
-        print(f"ERROR: batch concat failed: {exc}", file=sys.stderr)
+        print_loguru(f"ERROR: batch concat failed: {exc}", file=sys.stderr)
         _handle_batch_concat_temp_dir_after_failure(temp_dir, keep_temp=args.keep_temp)
         return EXIT_INFERENCE_ERROR
 
@@ -715,11 +770,11 @@ def _cleanup_batch_concat_temp_dir(temp_dir):
 def _handle_batch_concat_temp_dir_after_failure(temp_dir, keep_temp=False):
     if keep_temp:
         if temp_dir is not None:
-            print(f"Temp dir: {temp_dir}", file=sys.stderr)
+            print_loguru(f"Temp dir: {temp_dir}", file=sys.stderr)
         return
     cleanup_error = _cleanup_batch_concat_temp_dir(temp_dir)
     if cleanup_error is not None:
-        print(f"WARNING: cleanup failed: {cleanup_error}", file=sys.stderr)
+        print_loguru(f"WARNING: cleanup failed: {cleanup_error}", file=sys.stderr)
 
 
 def _run_concat(args):
@@ -731,19 +786,19 @@ def _run_concat(args):
             force=args.force,
         )
     except ConcatFileError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print_loguru(f"ERROR: {exc}", file=sys.stderr)
         return exc.exit_code
     if not args.dry_run:
         try:
             _concatenate_wav_segments(segments, output_path)
         except ConcatExecutionError as exc:
-            print(f"ERROR: concat failed: {exc}", file=sys.stderr)
+            print_loguru(f"ERROR: concat failed: {exc}", file=sys.stderr)
             if exc.cleanup_error is not None:
-                print(f"WARNING: cleanup failed: {exc.cleanup_error}", file=sys.stderr)
+                print_loguru(f"WARNING: cleanup failed: {exc.cleanup_error}", file=sys.stderr)
             return EXIT_INFERENCE_ERROR
-        print(f"Generated: {output_path}")
+        print_loguru(f"Generated: {output_path}")
         return EXIT_SUCCESS
-    print(f"Concat file OK: {len(segments)} segments")
+    print_loguru(f"Concat file OK: {len(segments)} segments")
     return EXIT_SUCCESS
 
 
@@ -1477,48 +1532,48 @@ def _run_check(args):
     imports = _import_required_packages()
     if imports.missing:
         missing = ", ".join(imports.missing)
-        print(f"ERROR: missing required Python packages: {missing}", file=sys.stderr)
+        print_loguru(f"ERROR: missing required Python packages: {missing}", file=sys.stderr)
         return EXIT_RUNTIME_UNAVAILABLE
 
     devices = _detect_devices(imports.torch)
     if args.device and not _is_requested_device_available(imports.torch, devices, args.device):
-        print(f"ERROR: requested device is not available: {args.device}", file=sys.stderr)
+        print_loguru(f"ERROR: requested device is not available: {args.device}", file=sys.stderr)
         return EXIT_RUNTIME_UNAVAILABLE
 
-    print(f"Checking model directory: {model_dir}")
-    print(f"OK: model directory {model_dir}")
-    print("OK: required model files")
-    print("OK: python packages")
+    print_loguru(f"Checking model directory: {model_dir}")
+    print_loguru(f"OK: model directory {model_dir}")
+    print_loguru("OK: required model files")
+    print_loguru("OK: python packages")
     for device in ("cuda", "xpu", "mps", "cpu"):
         status = "available" if devices[device] else "unavailable"
-        print(f"{device}: {status}")
+        print_loguru(f"{device}: {status}")
     return EXIT_SUCCESS
 
 
 def _report_missing_model_resources(model_dir):
     missing_files = _missing_model_files(model_dir)
     if missing_files is None:
-        print(f"ERROR: model directory does not exist: {model_dir}", file=sys.stderr)
+        print_loguru(f"ERROR: model directory does not exist: {model_dir}", file=sys.stderr)
         _print_model_resource_help(model_dir, "model directory does not exist")
         return EXIT_MISSING_RESOURCE
     if missing_files:
         missing = ", ".join(missing_files)
-        print(f"ERROR: missing required model files: {missing}", file=sys.stderr)
+        print_loguru(f"ERROR: missing required model files: {missing}", file=sys.stderr)
         _print_model_resource_help(model_dir, missing)
         return EXIT_MISSING_RESOURCE
     return None
 
 
 def _print_model_resource_help(model_dir, missing_summary):
-    print(f"Model directory: {model_dir}", file=sys.stderr)
-    print(f"Missing resources: {missing_summary}", file=sys.stderr)
-    print("Download with HuggingFace:", file=sys.stderr)
-    print(f'  huggingface-cli download {MODEL_REPO_ID} --local-dir "{model_dir}"', file=sys.stderr)
-    print("Download with ModelScope:", file=sys.stderr)
-    print(f'  modelscope download --model {MODEL_REPO_ID} --local_dir "{model_dir}"', file=sys.stderr)
-    print("Persist a different model resource directory:", file=sys.stderr)
-    print(f"  indextts2 config set model_dir {model_dir}", file=sys.stderr)
-    print("Hint: rerun indextts2 download or choose a different model resource directory.", file=sys.stderr)
+    print_loguru(f"Model directory: {model_dir}", file=sys.stderr)
+    print_loguru(f"Missing resources: {missing_summary}", file=sys.stderr)
+    print_loguru("Download with HuggingFace:", file=sys.stderr)
+    print_loguru(f'  huggingface-cli download {MODEL_REPO_ID} --local-dir "{model_dir}"', file=sys.stderr)
+    print_loguru("Download with ModelScope:", file=sys.stderr)
+    print_loguru(f'  modelscope download --model {MODEL_REPO_ID} --local_dir "{model_dir}"', file=sys.stderr)
+    print_loguru("Persist a different model resource directory:", file=sys.stderr)
+    print_loguru(f"  indextts2 config set model_dir {model_dir}", file=sys.stderr)
+    print_loguru("Hint: rerun indextts2 download or choose a different model resource directory.", file=sys.stderr)
 
 
 def _missing_model_files(model_dir):

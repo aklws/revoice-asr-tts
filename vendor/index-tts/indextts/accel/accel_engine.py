@@ -1,8 +1,8 @@
-import sys
+from indextts.utils.loguru_print import print_loguru
+
 from typing import List, Optional
 
 import torch
-from loguru import logger
 from torch import nn
 
 from .attention import (
@@ -220,7 +220,7 @@ class AccelInferenceEngine:
         return temperatures
 
     def _capture_cuda_graphs(self, tts_mel_embedding=None, tts_text_pos_embedding=None):
-        logger.info("正在捕获用于解码优化的 CUDA 图...")
+        print_loguru("Capturing CUDA graphs for decode optimization...")
         max_bs = 8  # Support up to batch size 8
         max_num_blocks = (2048 + self.block_size - 1) // self.block_size
         model_dtype = next(self.model.parameters()).dtype
@@ -308,7 +308,7 @@ class AccelInferenceEngine:
             "outputs": outputs,
             "inputs_embeds": inputs_embeds_buffer,
         }
-        logger.info("CUDA 图捕获完成，支持的批大小: {}", self.graph_bs)
+        print_loguru(f"CUDA graphs captured for batch sizes: {self.graph_bs}")
 
     def _run_decode_with_graph(
         self,
@@ -360,7 +360,7 @@ class AccelInferenceEngine:
         graph_vars = self.graph_vars
 
         if graph_vars is None:
-                raise RuntimeError("图相关变量尚未初始化")
+            raise RuntimeError("Graph variables not initialized")
 
         graph_vars["input_ids"][:bs] = input_ids
         graph_vars["positions"][:bs] = positions
@@ -414,17 +414,17 @@ class AccelInferenceEngine:
         self._tts_prompt_len = input_ids.size(1) if self._tts_mode else 0
 
         if self.use_cuda_graph and not self.graph_captured:
-            logger.info(
-                "[CAPTURE] use_cuda_graph={}, graph_captured={}",
-                self.use_cuda_graph,
-                self.graph_captured,
+            print_loguru(
+                f"[CAPTURE] use_cuda_graph={self.use_cuda_graph}, graph_captured={self.graph_captured}",
             )
             self._capture_cuda_graphs(
                 tts_mel_embedding=tts_mel_embedding,
                 tts_text_pos_embedding=tts_text_pos_embedding,
             )
             self.graph_captured = True
-            logger.info("[CAPTURE] 捕获完成，已生成图: {}", list(self.graphs.keys()))
+            print_loguru(
+                f"[CAPTURE] Completed! graphs={list(self.graphs.keys())}",
+            )
 
         if tts_embeddings is not None:
             actual_seq_len = tts_embeddings.size(1) + 1  # embeddings + start_mel_token

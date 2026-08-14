@@ -1,9 +1,9 @@
-"""Auto-download missing checkpoints/models at startup."""
+"""Model setup helpers for manual and runtime-driven downloads."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib
+import inspect
 import threading
 import time
 from functools import cache
@@ -11,13 +11,17 @@ from pathlib import Path
 from typing import Callable
 from modelscope.hub.callback import ProgressCallback as ModelScopeProgressCallback
 
+from app.core import get_indextts_vendor_loader
 from app.core.config import (
     CHECKPOINTS_DIR,
+    DEFAULT_ASR_MODEL_DIR,
     DEFAULT_EMOTION_MODEL_DIR,
     default_index_tts_model_dir,
     get_settings,
     resolve_supported_index_tts_model_repos,
 )
+from app.core.funasr_gguf import resolve_quantized_artifacts
+from app.core.index_tts_files import get_index_tts_missing_files
 from app.core.logging import get_logger
 from app.core.modelscope_compat import get_model_files as modelscope_get_model_files
 from app.core.modelscope_compat import snapshot_download as modelscope_snapshot_download
@@ -28,6 +32,13 @@ _MODEL_SETUP_LOCK = threading.RLock()
 
 ProgressPayload = dict[str, object]
 ProgressCallback = Callable[[ProgressPayload], None]
+_INDEX_TTS_BIGVGAN_REPO = "nv-community/bigvgan_v2_22khz_80band_256x"
+_W2V_BERT_REQUIRED_FILES: tuple[str, ...] = (
+    "config.json",
+    "configuration.json",
+    "model.safetensors",
+    "preprocessor_config.json",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +50,25 @@ class _ModelSpec:
     repo: str | None = None
 
 
-_DOWNLOADABLE_MODELS: tuple[_ModelSpec, ...] = (
+@dataclass(frozen=True, slots=True)
+class IndexTTSModelCatalogItem:
+    display_name: str
+    repo: str
+    target_dir: Path
+    installed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadableModelCatalogItem:
+    display_name: str
+    repo: str
+    target_dir: Path
+    installed: bool
+    kind: str
+
+
+_STARTUP_DOWNLOADABLE_MODELS: tuple[_ModelSpec, ...] = ()
+_MANUAL_DOWNLOADABLE_MODELS: tuple[_ModelSpec, ...] = (
     _ModelSpec(
         display_name="emotion2vec+",
         target_dir=DEFAULT_EMOTION_MODEL_DIR,
@@ -47,14 +76,63 @@ _DOWNLOADABLE_MODELS: tuple[_ModelSpec, ...] = (
         markers=("configuration.json", "README.md", "model.pt", "config.yaml"),
         marker_policy="any",
     ),
+    _ModelSpec(
+        display_name="Fun-ASR-Nano-2512 GGUF",
+        target_dir=DEFAULT_ASR_MODEL_DIR,
+        repo="aklwss/Fun-ASR-Nano-2512-gguf",
+        markers=(
+            "Fun-ASR-Nano-Encoder-Adaptor.int4.onnx",
+            "Fun-ASR-Nano-CTC.int4.onnx",
+            "Fun-ASR-Nano-Decoder.q5_k.gguf",
+            "tokens.txt",
+        ),
+        marker_policy="all",
+    ),
+    _ModelSpec(
+        display_name="MeanVC2",
+        target_dir=CHECKPOINTS_DIR / "MeanVC2",
+        repo="aklwss/MeanVC2",
+        markers=(
+            "config_120ms_40ms.json",
+            "meanvc2_120ms_40ms.safetensors",
+            "fastu2pp_160ms.pt",
+            "vocos.pt",
+            "wavlm_large_finetune.pth",
+            "wavlm_large_cfg.pt",
+        ),
+        marker_policy="all",
+    ),
 )
 _LOCAL_MODELS: tuple[_ModelSpec, ...] = ()
 
 
 @cache
+def _load_indextts_model_download_module():
+    return get_indextts_vendor_loader().import_module("indextts.utils.model_download")
+
+
+@cache
 def _load_indextts_ensure_models_available():
-    module = importlib.import_module("indextts.utils.model_download")
+    module = _load_indextts_model_download_module()
     return module.ensure_models_available
+
+
+def _w2v_bert_cache_ready(model_dir: Path) -> bool:
+    base_dir = model_dir / "hf_cache" / "w2v-bert-2.0"
+    return base_dir.exists() and all((base_dir / name).exists() for name in _W2V_BERT_REQUIRED_FILES)
+
+
+def _repair_indextts_w2v_cache(
+    model_dir: Path,
+    display_name: str,
+    status_callback: StatusCallback | None = None,
+) -> None:
+    if _w2v_bert_cache_ready(model_dir):
+        return
+    _emit_status(status_callback, f"{display_name}: 正在补齐 w2v-bert-2.0 ...")
+    module = _load_indextts_model_download_module()
+    target_dir = model_dir / "hf_cache" / "w2v-bert-2.0"
+    module.snapshot_download("facebook/w2v-bert-2.0", local_dir=str(target_dir))
 
 
 def _emit_status(status_callback: StatusCallback | None, message: str) -> None:
@@ -384,58 +462,120 @@ def _ensure_indextts_aux_models(
         progress_callback(wrapped)
 
     _emit_status(status_callback, f"正在准备 {display_name} 附属模型...")
-    ensure_models_available(
-        str(model_dir),
-        status_callback=_wrapped_status,
-        progress_callback=_wrapped_progress,
-    )
+    parameters = inspect.signature(ensure_models_available).parameters
+    kwargs: dict[str, object] = {}
+    if "status_callback" in parameters:
+        kwargs["status_callback"] = _wrapped_status
+    if "progress_callback" in parameters:
+        kwargs["progress_callback"] = _wrapped_progress
+    if "bigvgan_repo" in parameters:
+        kwargs["bigvgan_repo"] = _INDEX_TTS_BIGVGAN_REPO
+    ensure_models_available(str(model_dir), **kwargs)
+    _repair_indextts_w2v_cache(model_dir, display_name, status_callback=status_callback)
+    missing_files = tuple(get_index_tts_missing_files(model_dir, local_only=True))
+    if missing_files:
+        raise RuntimeError(
+            f"{display_name} 附属模型仍不完整，缺少：{', '.join(missing_files)}"
+        )
     _emit_status(status_callback, f"{display_name} 附属模型已就绪")
 
 
 def _repo_display_name(repo: str) -> str:
     repo_name = repo.rsplit("/", 1)[-1] if "/" in repo else repo
-    return repo_name if repo_name else "IndexTTS-2"
+    return repo_name if repo_name else "IndexTTS-2.5"
 
 
 def _resolve_index_tts_model_specs() -> tuple[_ModelSpec, ...]:
     settings = get_settings()
-    specs: list[_ModelSpec] = []
-    for repo in resolve_supported_index_tts_model_repos():
-        if repo == settings.index_tts_model_repo:
-            target_dir = settings.index_tts_model_dir
-        else:
-            target_dir = default_index_tts_model_dir(repo)
-        display_name = _repo_display_name(repo)
-        specs.append(
-            _ModelSpec(
-                display_name=display_name,
-                target_dir=target_dir,
-                repo=repo,
-                markers=("config.yaml",),
+    repo = settings.index_tts_model_repo
+    target_dir = settings.index_tts_model_dir
+    display_name = _repo_display_name(repo)
+    return (
+        _ModelSpec(
+            display_name=display_name,
+            target_dir=target_dir,
+            repo=repo,
+            markers=("config.yaml",),
+        ),
+    )
+
+
+def resolve_index_tts_model_spec(repo: str) -> _ModelSpec:
+    settings = get_settings()
+    normalized_repo = str(repo or "").strip()
+    if not normalized_repo:
+        raise ValueError("模型仓库不能为空。")
+    target_dir = settings.index_tts_model_dir if normalized_repo == settings.index_tts_model_repo else default_index_tts_model_dir(normalized_repo)
+    return _ModelSpec(
+        display_name=_repo_display_name(normalized_repo),
+        target_dir=target_dir,
+        repo=normalized_repo,
+        markers=("config.yaml",),
+    )
+
+
+def resolve_downloadable_model_spec(repo: str) -> tuple[_ModelSpec, str]:
+    normalized_repo = str(repo or "").strip()
+    if not normalized_repo:
+        raise ValueError("模型仓库不能为空。")
+    for model in _MANUAL_DOWNLOADABLE_MODELS:
+        if model.repo == normalized_repo:
+            return model, "optional"
+    return resolve_index_tts_model_spec(normalized_repo), "index_tts"
+
+
+def list_index_tts_model_catalog(repos: list[str] | tuple[str, ...]) -> tuple[IndexTTSModelCatalogItem, ...]:
+    items: list[IndexTTSModelCatalogItem] = []
+    seen: set[str] = set()
+    for repo in repos:
+        spec = resolve_index_tts_model_spec(repo)
+        if spec.repo is None or spec.repo in seen:
+            continue
+        seen.add(spec.repo)
+        items.append(
+            IndexTTSModelCatalogItem(
+                display_name=spec.display_name,
+                repo=spec.repo,
+                target_dir=spec.target_dir,
+                installed=_has_model_markers(spec),
             )
         )
-    return tuple(specs)
+    return tuple(items)
+
+
+def list_downloadable_model_catalog(repos: list[str] | tuple[str, ...]) -> tuple[DownloadableModelCatalogItem, ...]:
+    items: list[DownloadableModelCatalogItem] = []
+    seen: set[str] = set()
+    for repo in repos:
+        spec, kind = resolve_downloadable_model_spec(repo)
+        if spec.repo is None or spec.repo in seen:
+            continue
+        seen.add(spec.repo)
+        items.append(
+            DownloadableModelCatalogItem(
+                display_name=spec.display_name,
+                repo=spec.repo,
+                target_dir=spec.target_dir,
+                installed=_has_model_markers(spec),
+                kind=kind,
+            )
+        )
+    return tuple(items)
 
 
 def _resolve_asr_model_spec() -> _ModelSpec:
     settings = get_settings()
+    artifacts = resolve_quantized_artifacts()
     return _ModelSpec(
-        display_name="Fun-ASR-Nano-2512",
-        target_dir=settings.asr_model_dir,
-        repo=settings.asr_model_repo,
-        markers=("config.yaml",),
+        display_name="Fun-ASR-Nano-2512 GGUF",
+        target_dir=artifacts.model_dir if artifacts is not None else settings.asr_model_dir,
+        markers=(
+            "Fun-ASR-Nano-Encoder-Adaptor.int4.onnx",
+            "Fun-ASR-Nano-CTC.int4.onnx",
+            "Fun-ASR-Nano-Decoder.q5_k.gguf",
+            "tokens.txt",
+        ),
         marker_policy="all",
-    )
-
-
-def _resolve_speaker_model_spec() -> _ModelSpec:
-    settings = get_settings()
-    return _ModelSpec(
-        display_name="CAMPPlus Speaker Verification",
-        target_dir=settings.speaker_model_dir,
-        repo=settings.speaker_model_repo,
-        markers=("README.md", "examples", "configuration.json", "config.yaml"),
-        marker_policy="any",
     )
 
 
@@ -465,15 +605,14 @@ def ensure_models(
     status_callback: StatusCallback | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
-    """Check all required models exist; auto-download missing ones."""
+    """Check startup models without blocking app launch on missing ASR assets."""
     with _MODEL_SETUP_LOCK:
-        index_tts_models = _resolve_index_tts_model_specs()
-        asr_model = _resolve_asr_model_spec()
-        speaker_model = _resolve_speaker_model_spec()
-        downloadable_models = (asr_model, speaker_model, *index_tts_models, *_DOWNLOADABLE_MODELS)
+        local_models = _LOCAL_MODELS
+        downloadable_models = _STARTUP_DOWNLOADABLE_MODELS
+        
         progress_reporter = _StartupProgressReporter(
             progress_callback,
-            total_steps=len(_LOCAL_MODELS) + len(downloadable_models) + len(index_tts_models),
+            total_steps=len(local_models) + len(downloadable_models),
         )
         _emit_status(status_callback, "正在检查模型文件...")
         progress_reporter.begin_step(
@@ -483,7 +622,7 @@ def ensure_models(
             current_maximum=1,
         )
         CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-        for model in _LOCAL_MODELS:
+        for model in local_models:
             progress_reporter.begin_step(
                 model.display_name,
                 detail=f"正在检查 {model.display_name} 模型文件...",
@@ -530,8 +669,103 @@ def ensure_models(
                 logger.error(fail_message)
                 raise RuntimeError(fail_message)
 
-        _ensure_all_indextts_aux_models(
-            index_tts_models,
-            progress_reporter,
-            status_callback=status_callback,
+
+def ensure_index_tts_model(
+    repo: str,
+    status_callback: StatusCallback | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
+    with _MODEL_SETUP_LOCK:
+        model = resolve_index_tts_model_spec(repo)
+        progress_reporter = _StartupProgressReporter(progress_callback, total_steps=2)
+
+        progress_reporter.begin_step(
+            model.display_name,
+            detail=f"正在检查 {model.display_name} 模型文件...",
+            current_value=0,
+            current_maximum=1,
         )
+        if _has_model_markers(model):
+            ready_message = f"{model.display_name} 已就绪"
+            _emit_status(status_callback, ready_message)
+            logger.info(ready_message)
+            progress_reporter.finish_step(detail=ready_message)
+        else:
+            missing_message = f"{model.display_name} 模型未找到，开始自动下载..."
+            _emit_status(status_callback, missing_message)
+            logger.warning(missing_message)
+            if _download_model(
+                model,
+                status_callback=status_callback,
+                progress_callback=progress_reporter.child_progress_callback(model.display_name),
+            ):
+                done_message = f"{model.display_name} 下载完成"
+                _emit_status(status_callback, done_message)
+                logger.info(done_message)
+                progress_reporter.finish_step(detail=done_message)
+            else:
+                fail_message = f"{model.display_name} 自动下载失败，请手动放置到 {model.target_dir}"
+                logger.error(fail_message)
+                raise RuntimeError(fail_message)
+
+        progress_reporter.begin_step(
+            f"{model.display_name} 附属模型",
+            detail=f"正在准备 {model.display_name} 的附属模型...",
+            current_value=0,
+            current_maximum=4,
+        )
+        _ensure_indextts_aux_models(
+            model.target_dir,
+            model.display_name,
+            status_callback=status_callback,
+            progress_callback=progress_reporter.child_progress_callback(f"{model.display_name} 附属模型"),
+        )
+        progress_reporter.finish_step(detail=f"{model.display_name} 附属模型已就绪")
+        return model.target_dir
+
+
+def ensure_downloadable_model(
+    repo: str,
+    status_callback: StatusCallback | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
+    with _MODEL_SETUP_LOCK:
+        model, kind = resolve_downloadable_model_spec(repo)
+        if kind == "index_tts":
+            return ensure_index_tts_model(
+                repo,
+                status_callback=status_callback,
+                progress_callback=progress_callback,
+            )
+
+        progress_reporter = _StartupProgressReporter(progress_callback, total_steps=1)
+        progress_reporter.begin_step(
+            model.display_name,
+            detail=f"正在检查 {model.display_name} 模型文件...",
+            current_value=0,
+            current_maximum=1,
+        )
+        if _has_model_markers(model):
+            ready_message = f"{model.display_name} 已就绪"
+            _emit_status(status_callback, ready_message)
+            logger.info(ready_message)
+            progress_reporter.finish_step(detail=ready_message)
+            return model.target_dir
+
+        missing_message = f"{model.display_name} 模型未找到，开始自动下载..."
+        _emit_status(status_callback, missing_message)
+        logger.warning(missing_message)
+        if _download_model(
+            model,
+            status_callback=status_callback,
+            progress_callback=progress_reporter.child_progress_callback(model.display_name),
+        ):
+            done_message = f"{model.display_name} 下载完成"
+            _emit_status(status_callback, done_message)
+            logger.info(done_message)
+            progress_reporter.finish_step(detail=done_message)
+            return model.target_dir
+
+        fail_message = f"{model.display_name} 自动下载失败，请手动放置到 {model.target_dir}"
+        logger.error(fail_message)
+        raise RuntimeError(fail_message)

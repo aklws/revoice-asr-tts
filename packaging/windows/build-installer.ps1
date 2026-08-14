@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$RebuildApp
 )
 
@@ -6,21 +6,16 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+$pyprojectPath = Join-Path $repoRoot "pyproject.toml"
 $buildScript = Join-Path $scriptDir "build.ps1"
 $innoScript = Join-Path $scriptDir "installer.iss"
 
 $appName = "Revoice ASR-TTS"
 $appId = "Revoice-ASR-TTS"
-$appVersion = "0.0.6"
-$packageName = "Revoice-ASR-TTS-v$appVersion"
 $packageLauncherName = "Launch-Revoice-ASR-TTS.bat"
 $distRoot = Join-Path $repoRoot "dist"
-$packageDir = Join-Path $distRoot $packageName
-$packageLauncher = Join-Path $packageDir $packageLauncherName
 $appIcon = Join-Path $repoRoot "ui\assets\revoice_asr_tts.ico"
 $runtimeIconRelativePath = "ui\assets\revoice_asr_tts.ico"
-
-$outputInstaller = Join-Path $distRoot "$packageName-Setup.exe"
 $maxSingleInstallerBytes = 4GB
 
 function Find-FirstCommand([string[]]$names) {
@@ -70,6 +65,26 @@ function Find-InnoSetupCommand() {
     return Get-Item $candidatePath
 }
 
+function Get-AppVersionFromPyProject([string]$filePath) {
+    if (-not (Test-Path $filePath)) {
+        throw "未找到 pyproject.toml: $filePath"
+    }
+
+    foreach ($line in Get-Content $filePath -Encoding UTF8) {
+        if ($line -match '^\s*version\s*=\s*"([^"]+)"\s*$') {
+            return $Matches[1]
+        }
+    }
+
+    throw "无法从 pyproject.toml 解析版本号: $filePath"
+}
+
+$appVersion = Get-AppVersionFromPyProject $pyprojectPath
+$packageName = "Revoice-ASR-TTS-v$appVersion"
+$packageDir = Join-Path $distRoot $packageName
+$packageLauncher = Join-Path $packageDir $packageLauncherName
+$outputInstaller = Join-Path $distRoot "$packageName-Setup.exe"
+
 $innoCommand = Find-InnoSetupCommand
 
 function Remove-FileIfExists([string]$path) {
@@ -83,7 +98,11 @@ function Get-DirectorySizeBytes([string]$path) {
         return 0
     }
     $measure = Get-ChildItem -Path $path -Recurse -File | Measure-Object -Property Length -Sum
-    return [int64]($measure.Sum ?? 0)
+    $sizeBytes = $measure.Sum
+    if ($null -eq $sizeBytes) {
+        return 0
+    }
+    return [int64]$sizeBytes
 }
 
 if (-not $innoCommand) {

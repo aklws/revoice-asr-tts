@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import shutil
 from pathlib import Path
@@ -43,18 +44,37 @@ def _copy_package_tree(source_dir: Path, target_dir: Path) -> None:
     shutil.copytree(source_dir, target_dir, ignore=_ignore)
 
 
-def _collect_extensions(bundle_root: Path) -> list[Extension]:
+def _requires_source_fallback(py_file: Path) -> bool:
+    source = py_file.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(py_file))
+    return any(isinstance(node, ast.Match) for node in ast.walk(tree))
+
+
+def _detect_source_fallbacks(bundle_root: Path) -> set[str]:
+    fallback_paths: set[str] = set(CYTHON_EXCLUDE_RELATIVE_PATHS)
+    for py_file in sorted(bundle_root.rglob("*.py")):
+        relative_posix = py_file.relative_to(bundle_root).as_posix()
+        try:
+            requires_fallback = _requires_source_fallback(py_file)
+        except SyntaxError:
+            requires_fallback = True
+        if requires_fallback:
+            fallback_paths.add(relative_posix)
+    return fallback_paths
+
+
+def _collect_extensions(bundle_root: Path, excluded_relative_paths: set[str]) -> list[Extension]:
     extensions: list[Extension] = []
     for py_file in sorted(bundle_root.rglob("*.py")):
         relative_posix = py_file.relative_to(bundle_root).as_posix()
-        if relative_posix in CYTHON_EXCLUDE_RELATIVE_PATHS:
+        if relative_posix in excluded_relative_paths:
             continue
         module_name = ".".join(py_file.relative_to(bundle_root).with_suffix("").parts)
         extensions.append(Extension(module_name, [relative_posix]))
     return extensions
 
 
-def _strip_python_sources(bundle_root: Path) -> None:
+def _strip_python_sources(bundle_root: Path, excluded_relative_paths: set[str]) -> None:
     for path in sorted(bundle_root.rglob("*"), reverse=True):
         if path.is_dir():
             if path.name in IGNORED_DIR_NAMES:
@@ -62,7 +82,7 @@ def _strip_python_sources(bundle_root: Path) -> None:
             continue
         if path.suffix in {".py", ".c", ".html"}:
             relative_posix = path.relative_to(bundle_root).as_posix()
-            if path.suffix == ".py" and relative_posix in CYTHON_EXCLUDE_RELATIVE_PATHS:
+            if path.suffix == ".py" and relative_posix in excluded_relative_paths:
                 continue
             path.unlink(missing_ok=True)
 
@@ -82,12 +102,13 @@ def build_bundle(repo_root: Path, output_root: Path, build_root: Path, dry_run: 
         _copy_package_tree(source_dir, target_dir)
         copied_targets.append(target_dir)
 
-    extensions = _collect_extensions(output_root)
+    source_fallbacks = _detect_source_fallbacks(output_root)
+    extensions = _collect_extensions(output_root, source_fallbacks)
     if dry_run:
         print(f"bundle_root={output_root}")
         print(f"copied_packages={len(copied_targets)}")
         print(f"extension_count={len(extensions)}")
-        print(f"excluded_extensions={len(CYTHON_EXCLUDE_RELATIVE_PATHS)}")
+        print(f"excluded_extensions={len(source_fallbacks)}")
         return
 
     current_dir = Path.cwd()
@@ -119,12 +140,12 @@ def build_bundle(repo_root: Path, output_root: Path, build_root: Path, dry_run: 
     for artifact_dir in (output_root / "cy", output_root / "tmp"):
         shutil.rmtree(artifact_dir, ignore_errors=True)
 
-    _strip_python_sources(output_root)
+    _strip_python_sources(output_root, source_fallbacks)
 
     compiled_extensions = list(output_root.rglob("*.pyd"))
     print(f"bundle_root={output_root}")
     print(f"compiled_extensions={len(compiled_extensions)}")
-    print(f"source_fallbacks={len(CYTHON_EXCLUDE_RELATIVE_PATHS)}")
+    print(f"source_fallbacks={len(source_fallbacks)}")
 
 
 def parse_args() -> argparse.Namespace:

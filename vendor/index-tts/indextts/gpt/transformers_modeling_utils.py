@@ -44,7 +44,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.generation import GenerationConfig
 import transformers
-from transformers.generation.utils import GenerationMixin
+from indextts.gpt.transformers_generation_utils import GenerationMixin
 from transformers.generation import GenerationConfig
 
 
@@ -53,48 +53,13 @@ from transformers.loss.loss_utils import LOSS_MAPPING
 from transformers.pytorch_utils import (  # noqa: F401
     Conv1D,
     apply_chunking_to_forward,
+    find_pruneable_heads_and_indices,
     id_tensor_storage,
     is_torch_greater_or_equal_than_1_13,
+    prune_conv1d_layer,
+    prune_layer,
     prune_linear_layer,
 )
-try:
-    from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_conv1d_layer, prune_layer
-except ImportError:
-    def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
-        mask = torch.ones(n_heads, head_size, dtype=torch.bool)
-        heads = set(heads) - already_pruned_heads
-        for head in heads:
-            head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
-            if 0 <= head < n_heads:
-                mask[head] = False
-        index = torch.arange(n_heads * head_size, dtype=torch.long)[mask.view(-1)]
-        return heads, index
-
-    def prune_conv1d_layer(layer, index, dim=1):
-        index = index.to(layer.weight.device)
-        weight = layer.weight.index_select(dim, index).clone().detach()
-        if layer.bias is not None:
-            bias = layer.bias.clone().detach() if dim == 1 else layer.bias.index_select(0, index).clone().detach()
-        new_size = list(layer.weight.size())
-        new_size[dim] = len(index)
-        new_layer = Conv1D(new_size[1], new_size[0]).to(layer.weight.device)
-        new_layer.weight.requires_grad = False
-        new_layer.weight.copy_(weight.contiguous())
-        new_layer.weight.requires_grad = True
-        if layer.bias is not None:
-            new_layer.bias.requires_grad = False
-            new_layer.bias.copy_(bias.contiguous())
-            new_layer.bias.requires_grad = True
-        return new_layer
-
-    def prune_layer(layer, index, dim=None):
-        if isinstance(layer, nn.Linear):
-            target_dim = 0 if dim is None else dim
-            return prune_linear_layer(layer, index, dim=target_dim)
-        if isinstance(layer, Conv1D):
-            target_dim = 1 if dim is None else dim
-            return prune_conv1d_layer(layer, index, dim=target_dim)
-        raise TypeError(f"Unsupported layer type for prune_layer: {type(layer)!r}")
 from transformers.quantizers import AutoHfQuantizer, HfQuantizer
 from transformers.quantizers.quantizers_utils import get_module_from_name
 from transformers.safetensors_conversion import auto_conversion

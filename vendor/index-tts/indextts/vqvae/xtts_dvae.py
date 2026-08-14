@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import functools
 from math import sqrt
 
@@ -79,7 +81,7 @@ class Quantize(nn.Module):
             self.embed_avg = (ea * ~mask + rand_embed).permute(1, 0)
             self.cluster_size = self.cluster_size * ~mask.squeeze()
             if torch.any(mask):
-                print(f"Reset {torch.sum(mask)} embedding codes.")
+                print_loguru(f"Reset {torch.sum(mask)} embedding codes.")
                 self.codes = None
                 self.codes_full = False
 

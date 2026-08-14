@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import math
 import numpy as np
 import torch
@@ -531,7 +533,7 @@ def load_checkpoint(
     state = torch.load(path, map_location="cpu")
     params = state["net"]
     if load_ema and "ema" in state:
-        print("Loading EMA")
+        print_loguru("Loading EMA")
         for key in model:
             i = 0
             for param_name in params[key]:
@@ -557,10 +559,10 @@ def load_checkpoint(
             }
             skipped_keys = set(params[key].keys()) - set(filtered_state_dict.keys())
             if skipped_keys:
-                print(
+                print_loguru(
                     f"Warning: Skipped loading some keys due to shape mismatch: {skipped_keys}"
                 )
-            print("%s loaded" % key)
+            print_loguru("%s loaded" % key)
             model[key].load_state_dict(filtered_state_dict, strict=False)
     _ = [model[key].eval() for key in model]
 
@@ -588,7 +590,7 @@ def load_checkpoint2(
     state = torch.load(path, map_location="cpu")
     params = state["net"]
     if load_ema and "ema" in state:
-        print("Loading EMA")
+        print_loguru("Loading EMA")
         for key in model.models:
             i = 0
             for param_name in params[key]:
@@ -614,10 +616,10 @@ def load_checkpoint2(
             }
             skipped_keys = set(params[key].keys()) - set(filtered_state_dict.keys())
             if skipped_keys:
-                print(
+                print_loguru(
                     f"Warning: Skipped loading some keys due to shape mismatch: {skipped_keys}"
                 )
-            print("%s loaded" % key)
+            print_loguru("%s loaded" % key)
             model.models[key].load_state_dict(filtered_state_dict, strict=False)
     model.eval()
 #     _ = [model[key].eval() for key in model]

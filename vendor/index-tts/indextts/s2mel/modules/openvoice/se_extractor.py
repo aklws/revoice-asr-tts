@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import os
 import glob
 import torch
@@ -86,7 +88,7 @@ def split_audio_vad(audio_path, audio_name, target_dir, split_seconds=10.0):
     )
     segments = [(seg["start"], seg["end"]) for seg in segments]
     segments = [(float(s) / SAMPLE_RATE, float(e) / SAMPLE_RATE) for s,e in segments]
-    print(segments)
+    print_loguru(segments)
     audio_active = AudioSegment.silent(duration=0)
     audio = AudioSegment.from_file(audio_path)
 
@@ -94,7 +96,7 @@ def split_audio_vad(audio_path, audio_name, target_dir, split_seconds=10.0):
         audio_active += audio[int( start_time * 1000) : int(end_time * 1000)]
     
     audio_dur = audio_active.duration_seconds
-    print(f'after vad: dur = {audio_dur}')
+    print_loguru(f'after vad: dur = {audio_dur}')
     target_folder = os.path.join(target_dir, audio_name)
     wavs_folder = os.path.join(target_folder, 'wavs')
     os.makedirs(wavs_folder, exist_ok=True)
@@ -129,7 +131,7 @@ def hash_numpy_array(audio_path):
 def get_se(audio_path, vc_model, target_dir='processed', vad=True):
     device = vc_model.device
     version = vc_model.version
-    print("OpenVoice version:", version)
+    print_loguru("OpenVoice version:", version)
 
     audio_name = f"{os.path.basename(audio_path).rsplit('.', 1)[0]}_{version}_{hash_numpy_array(audio_path)}"
     se_path = os.path.join(target_dir, audio_name, 'se.pth')

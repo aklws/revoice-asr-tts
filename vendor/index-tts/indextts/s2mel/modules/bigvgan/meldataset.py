@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2024 NVIDIA CORPORATION.
 #   Licensed under the MIT license.
 
@@ -86,9 +88,9 @@ def mel_spectrogram(
         torch.Tensor: Mel spectrogram.
     """
     if torch.min(y) < -1.0:
-        print(f"[WARNING] Min value of input waveform signal is {torch.min(y)}")
+        print_loguru(f"[WARNING] Min value of input waveform signal is {torch.min(y)}")
     if torch.max(y) > 1.0:
-        print(f"[WARNING] Max value of input waveform signal is {torch.max(y)}")
+        print_loguru(f"[WARNING] Max value of input waveform signal is {torch.max(y)}")
 
     device = y.device
     key = f"{n_fft}_{num_mels}_{sampling_rate}_{hop_size}_{win_size}_{fmin}_{fmax}_{device}"
@@ -162,7 +164,7 @@ def get_dataset_filelist(a):
             for x in fi.read().split("\n")
             if len(x) > 0
         ]
-        print(f"first training file: {training_files[0]}")
+        print_loguru(f"first training file: {training_files[0]}")
 
     with open(a.input_validation_file, "r", encoding="utf-8") as fi:
         validation_files = [
@@ -170,7 +172,7 @@ def get_dataset_filelist(a):
             for x in fi.read().split("\n")
             if len(x) > 0
         ]
-        print(f"first validation file: {validation_files[0]}")
+        print_loguru(f"first validation file: {validation_files[0]}")
 
     for i in range(len(a.list_input_unseen_validation_file)):
         with open(a.list_input_unseen_validation_file[i], "r", encoding="utf-8") as fi:
@@ -179,7 +181,7 @@ def get_dataset_filelist(a):
                 for x in fi.read().split("\n")
                 if len(x) > 0
             ]
-            print(
+            print_loguru(
                 f"first unseen {i}th validation fileset: {unseen_validation_files[0]}"
             )
             list_unseen_validation_files.append(unseen_validation_files)
@@ -237,7 +239,7 @@ class MelDataset(torch.utils.data.Dataset):
         self.fine_tuning = fine_tuning
         self.base_mels_path = base_mels_path
 
-        print("[INFO] checking dataset integrity...")
+        print_loguru("[INFO] checking dataset integrity...")
         for i in tqdm(range(len(self.audio_files))):
             assert os.path.exists(
                 self.audio_files[i]

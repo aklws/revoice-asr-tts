@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2022 NVIDIA CORPORATION.
 #   Licensed under the MIT license.
 
@@ -250,7 +252,7 @@ class BigVGAN(torch.nn.Module):
         return x, contrastive_loss
 
     def remove_weight_norm(self):
-        print('Removing weight norm...')
+        print_loguru('Removing weight norm...')
         for l in self.ups:
             for l_i in l:
                 remove_weight_norm(l_i)
@@ -316,7 +318,7 @@ class MultiPeriodDiscriminator(torch.nn.Module):
     def __init__(self, h):
         super(MultiPeriodDiscriminator, self).__init__()
         self.mpd_reshapes = h.mpd_reshapes
-        print("mpd_reshapes: {}".format(self.mpd_reshapes))
+        print_loguru("mpd_reshapes: {}".format(self.mpd_reshapes))
         discriminators = [DiscriminatorP(h, rs, use_spectral_norm=h.use_spectral_norm) for rs in self.mpd_reshapes]
         self.discriminators = nn.ModuleList(discriminators)
 
@@ -347,11 +349,11 @@ class DiscriminatorR(nn.Module):
 
         norm_f = weight_norm if cfg.use_spectral_norm == False else spectral_norm
         if hasattr(cfg, "mrd_use_spectral_norm"):
-            print("INFO: overriding MRD use_spectral_norm as {}".format(cfg.mrd_use_spectral_norm))
+            print_loguru("INFO: overriding MRD use_spectral_norm as {}".format(cfg.mrd_use_spectral_norm))
             norm_f = weight_norm if cfg.mrd_use_spectral_norm == False else spectral_norm
         self.d_mult = cfg.discriminator_channel_mult
         if hasattr(cfg, "mrd_channel_mult"):
-            print("INFO: overriding mrd channel multiplier as {}".format(cfg.mrd_channel_mult))
+            print_loguru("INFO: overriding mrd channel multiplier as {}".format(cfg.mrd_channel_mult))
             self.d_mult = cfg.mrd_channel_mult
 
         self.convs = nn.ModuleList([

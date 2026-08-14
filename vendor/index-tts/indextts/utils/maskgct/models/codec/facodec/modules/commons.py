@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2023 Amphion.
 #
 # This source code is licensed under the MIT license found in the
@@ -305,7 +307,7 @@ def load_checkpoint(
                     if k.startswith("module."):
                         params[key][k[len("module.") :]] = params[key][k]
                         del params[key][k]
-            print("%s loaded" % key)
+            print_loguru("%s loaded" % key)
             model[key].load_state_dict(params[key], strict=True)
     _ = [model[key].eval() for key in model]
 

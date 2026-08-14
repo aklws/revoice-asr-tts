@@ -1,7 +1,9 @@
+from indextts.utils.loguru_print import print_loguru
+
+
 import os
 import re
 import random
-from loguru import logger
 import torch
 import torchaudio
 
@@ -10,7 +12,7 @@ MATPLOTLIB_FLAG = False
 
 def load_audio(audiopath, sampling_rate):
     audio, sr = torchaudio.load(audiopath)
-    #print(f"wave shape: {audio.shape}, sample_rate: {sr}")
+    #print_loguru(f"wave shape: {audio.shape}, sample_rate: {sr}")
 
     if audio.size(0) > 1:  # mix to mono
         audio = audio[0].unsqueeze(0)
@@ -18,8 +20,8 @@ def load_audio(audiopath, sampling_rate):
     if sr != sampling_rate:
         try:
             audio = torchaudio.functional.resample(audio, sr, sampling_rate)
-        except Exception:
-            logger.warning("音频重采样失败: 路径={}, 波形形状={}, 采样率={}", audiopath, audio.shape, sr)
+        except Exception as e:
+            print_loguru(f"Warning: {audiopath}, wave shape: {audio.shape}, sample_rate: {sr}")
             return None
     # clip audio invalid values
     audio.clip_(-1, 1)

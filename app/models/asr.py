@@ -12,3 +12,5 @@ class ASRRequest:
     language: str | None = None
     return_language: bool = True
     context: str | None = None
+    enable_ctc: bool = True
+    enable_prompt_context: bool = True

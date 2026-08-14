@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 from typing import Union
 
 import numpy as np
@@ -336,4 +338,4 @@ if __name__ == "__main__":
     rvq = ResidualVectorQuantize(quantizer_dropout=True)
     x = torch.randn(16, 512, 80)
     y = rvq(x)
-    print(y["latents"].shape)
+    print_loguru(y["latents"].shape)

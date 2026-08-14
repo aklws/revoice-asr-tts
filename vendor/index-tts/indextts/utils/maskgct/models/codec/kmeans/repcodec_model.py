@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2024 Amphion.
 #
 # This source code is licensed under the MIT license found in the
@@ -201,10 +203,10 @@ class RepCodec(nn.Module):
 
 if __name__ == "__main__":
     repcodec = RepCodec(vocos_dim=1024, downsample_scale=2)
-    print(repcodec)
-    print(sum(p.numel() for p in repcodec.parameters()) / 1e6)
+    print_loguru(repcodec)
+    print_loguru(sum(p.numel() for p in repcodec.parameters()) / 1e6)
     x = torch.randn(5, 10, 1024)
     x_rec, codebook_loss, all_indices = repcodec(x)
-    print(x_rec.shape, codebook_loss, all_indices.shape)
+    print_loguru(x_rec.shape, codebook_loss, all_indices.shape)
     vq_id, emb = repcodec.quantize(x)
-    print(vq_id.shape, emb.shape)
+    print_loguru(vq_id.shape, emb.shape)

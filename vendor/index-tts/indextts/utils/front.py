@@ -1,30 +1,20 @@
 # -*- coding: utf-8 -*-
+from indextts.utils.loguru_print import print_loguru
+
 from functools import lru_cache
-import importlib
 import os
-import platform
 import traceback
 import re
-from functools import cache
 from typing import List, Union, overload
 import warnings
-from loguru import logger
 from indextts.utils.common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
 
-@cache
-def _load_yaml_module():
-    return importlib.import_module("yaml")
-
-
 class TextNormalizer:
-    JAPANESE_KANA_PATTERN = r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]"
-
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
-        self.force_japanese = False
         self.char_rep_map = {
             "：": ",",
             "；": ",",
@@ -66,6 +56,7 @@ class TextNormalizer:
             "$": ".",
             **self.char_rep_map,
         }
+        self.clean_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
         self.enable_glossary = enable_glossary
         # 术语词汇表：用户可自定义专业术语的读法
         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
@@ -124,12 +115,10 @@ class TextNormalizer:
         has_pinyin = bool(re.search(TextNormalizer.PINYIN_TONE_PATTERN, s, re.IGNORECASE))
         return has_pinyin
 
-    def use_japanese(self, s):
-        return bool(re.search(TextNormalizer.JAPANESE_KANA_PATTERN, s))
-
     def load(self):
         # print(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         # sys.path.append(model_dir)
+        import platform
         if self.zh_normalizer is not None and self.en_normalizer is not None:
             return
         if platform.system() != "Linux":  # Mac and Windows
@@ -151,19 +140,45 @@ class TextNormalizer:
             )
             self.en_normalizer = NormalizerEn(overwrite_cache=False)
 
+    G2P_PRONUNCIATION_ANNOTATION_PATTERN = re.compile(r'<([^|>\n]+)\|([^>\n]+)>')
+
+    def _protect_pronunciation_annotations(self, text: str):
+        """
+        在 normalize 之前调用：将 <字|读音> 标注替换为纯字母占位符，
+        防止 normalizer 把标注内的数字/符号展开（如 XING2 -> XING二）。
+        返回 (替换后文本, 占位符字典)。
+        """
+        placeholders = {}
+        def _idx_to_alpha(n):
+            s = ''
+            while True:
+                s = chr(ord('a') + n % 26) + s
+                n = n // 26 - 1
+                if n < 0:
+                    break
+            return s
+        def _replacer(m):
+            tag = _idx_to_alpha(len(placeholders))
+            key = f'PRONPLACEHOLDER{tag}PRONPLACEHOLDER'
+            placeholders[key] = m.group(0)
+            return key
+        text = self.G2P_PRONUNCIATION_ANNOTATION_PATTERN.sub(_replacer, text)
+        return text, placeholders
+
+    @staticmethod
+    def _restore_pronunciation_annotations(text: str, placeholders: dict) -> str:
+        """在 normalize 之后调用：将占位符还原为原始 <字|读音> 标注。"""
+        for key, val in placeholders.items():
+            text = text.replace(key, val)
+        return text
+
     def normalize(self, text: str) -> str:
         if not self.zh_normalizer or not self.en_normalizer:
-            logger.error("文本归一化器尚未初始化")
+            print_loguru("Error, text normalizer is not initialized !!!")
             return ""
-        if self.force_japanese or self.use_japanese(text):
-            # Japanese checkpoints provide their own tokenizer/BPE. Avoid routing
-            # kana-containing text into the Chinese TN pipeline, which can mangle
-            # Japanese readings and punctuation.
-            if self.enable_glossary:
-                text = self.apply_glossary_terms(text, lang="en")
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], text)
-        elif self.use_chinese(text):
+        # 保护 G2P 发音标注 <word|pronunciation>，防止被 normalizer 破坏
+        text, _pron_placeholders = self._protect_pronunciation_annotations(text)
+        if self.use_chinese(text):
             text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:
@@ -177,7 +192,7 @@ class TextNormalizer:
                 result = self.zh_normalizer.normalize(replaced_text)
             except Exception:
                 result = ""
-                logger.exception("中文文本归一化失败")
+                print_loguru(traceback.format_exc())
             # 恢复人名
             result = self.restore_names(result, original_name_list)
             # 恢复拼音声调
@@ -199,9 +214,12 @@ class TextNormalizer:
                 result = self.restore_tech_terms(result, tech_list)
             except Exception:
                 result = text
-                logger.exception("英文文本归一化失败")
+                print_loguru(traceback.format_exc())
             pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
             result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            
+        # 恢复 G2P 发音标注
+        result = self._restore_pronunciation_annotations(result, _pron_placeholders)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -359,7 +377,7 @@ class TextNormalizer:
             NVMe: N-V-M-E  # 中英文相同读法
         """
         if glossary_path and os.path.exists(glossary_path):
-            yaml = _load_yaml_module()
+            import yaml
             with open(glossary_path, 'r', encoding='utf-8') as f:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
@@ -374,7 +392,7 @@ class TextNormalizer:
         Args:
             glossary_path: YAML 文件路径
         """
-        yaml = _load_yaml_module()
+        import yaml
         with open(glossary_path, 'w', encoding='utf-8') as f:
             yaml.dump(self.term_glossary, f, allow_unicode=True, default_flow_style=False)
 
@@ -620,7 +638,7 @@ class TextTokenizer:
         "▁?",
         "▁...", # ellipsis
     ]
-    def split_segments(self, tokenized: List[str], max_text_tokens_per_segment=80, quick_streaming_tokens = 0) -> List[List[str]]:
+    def split_segments(self, tokenized: List[str], max_text_tokens_per_segment=120, quick_streaming_tokens = 0) -> List[List[str]]:
         return TextTokenizer.split_segments_by_token(
             tokenized, self.punctuation_marks_tokens, max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
         )
@@ -695,46 +713,46 @@ if __name__ == "__main__":
         out_type=int,
     )
 
-    print(f"vocab_size: {tokenizer.vocab_size}")
+    print_loguru(f"vocab_size: {tokenizer.vocab_size}")
     # print(f"pad_token: {tokenizer.pad_token}, pad_token_id: {tokenizer.pad_token_id}")
-    print(f"bos_token: {tokenizer.bos_token}, bos_token_id: {tokenizer.bos_token_id}")
-    print(f"eos_token: {tokenizer.eos_token}, eos_token_id: {tokenizer.eos_token_id}")
-    print(f"unk_token: {tokenizer.unk_token}, unk_token_id: {tokenizer.unk_token_id}")
+    print_loguru(f"bos_token: {tokenizer.bos_token}, bos_token_id: {tokenizer.bos_token_id}")
+    print_loguru(f"eos_token: {tokenizer.eos_token}, eos_token_id: {tokenizer.eos_token_id}")
+    print_loguru(f"unk_token: {tokenizer.unk_token}, unk_token_id: {tokenizer.unk_token_id}")
     # 测试拼音 (8474-10201)
     for id in range(8474, 10201):
         pinyin = tokenizer.convert_ids_to_tokens(id)
         if re.match(TextNormalizer.PINYIN_TONE_PATTERN, pinyin, re.IGNORECASE) is None:
-            print(f"{pinyin} should be matched")
+            print_loguru(f"{pinyin} should be matched")
     for badcase in [
         "beta1", "better1", "voice2", "bala2", "babala2", "hunger2"
     ]:
         if re.match(TextNormalizer.PINYIN_TONE_PATTERN, badcase, re.IGNORECASE) is not None:
-            print(f"{badcase} should not be matched!")
+            print_loguru(f"{badcase} should not be matched!")
     # 不应该有 unk_token_id
     for t in set([*TextTokenizer.punctuation_marks_tokens, ",", "▁,", "-", "▁..."]):
         tokens = tokenizer.convert_tokens_to_ids(t)
         if tokenizer.unk_token_id in tokens:
-            print(f"Warning: {t} is unknown token")
-        print(f"`{t}`", "->", tokens, "->", tokenizer.convert_ids_to_tokens(tokens))
+            print_loguru(f"Warning: {t} is unknown token")
+        print_loguru(f"`{t}`", "->", tokens, "->", tokenizer.convert_ids_to_tokens(tokens))
     for ch in set(tokenizer.normalizer.zh_char_rep_map.values()):
         # 测试 normalize后的字符能被分词器识别
-        print(f"`{ch}`", "->", tokenizer.sp_model.Encode(ch, out_type=str))
-        print(f"` {ch}`", "->", tokenizer.sp_model.Encode(f" {ch}", out_type=str))
+        print_loguru(f"`{ch}`", "->", tokenizer.sp_model.Encode(ch, out_type=str))
+        print_loguru(f"` {ch}`", "->", tokenizer.sp_model.Encode(f" {ch}", out_type=str))
     max_text_tokens_per_segment=120
     for i in range(len(cases)):
-        print(f"原始文本: {cases[i]}")
-        print(f"Normalized: {text_normalizer.normalize(cases[i])}")
+        print_loguru(f"原始文本: {cases[i]}")
+        print_loguru(f"Normalized: {text_normalizer.normalize(cases[i])}")
         tokens = tokenizer.tokenize(cases[i])
-        print("Tokenzied: ", ", ".join([f"`{t}`" for t in tokens]))
+        print_loguru("Tokenzied: ", ", ".join([f"`{t}`" for t in tokens]))
         segments = tokenizer.split_segments(tokens, max_text_tokens_per_segment=max_text_tokens_per_segment)
-        print("Segments count:", len(segments))
+        print_loguru("Segments count:", len(segments))
         if len(segments) > 1:
             for j in range(len(segments)):
-                print(f"  {j}, count:", len(segments[j]), ", tokens:", "".join(segments[j]))
+                print_loguru(f"  {j}, count:", len(segments[j]), ", tokens:", "".join(segments[j]))
                 if len(segments[j]) > max_text_tokens_per_segment:
-                    print(f"Warning: segment {j} is too long, length: {len(segments[j])}")
+                    print_loguru(f"Warning: segment {j} is too long, length: {len(segments[j])}")
         #print(f"Token IDs (first 10): {codes[i][:10]}")
         if tokenizer.unk_token in codes[i]:
-            print(f"Warning: `{cases[i]}` contains UNKNOWN token")
-        print(f"Decoded: {tokenizer.decode(codes[i], do_lower_case=True)}")
-        print("-" * 50)
+            print_loguru(f"Warning: `{cases[i]}` contains UNKNOWN token")
+        print_loguru(f"Decoded: {tokenizer.decode(codes[i], do_lower_case=True)}")
+        print_loguru("-" * 50)

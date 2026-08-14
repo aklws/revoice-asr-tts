@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import os
 import torch
 import argparse
@@ -49,7 +51,7 @@ def predict(prompt, style, audio_file_pth, agree):
 
     # first detect the input language
     language_predicted = langid.classify(prompt)[0].strip()  
-    print(f"Detected language:{language_predicted}")
+    print_loguru(f"Detected language:{language_predicted}")
 
     if language_predicted not in supported_languages:
         text_hint += f"[ERROR] The detected language {language_predicted} for your input text is not in our Supported Languages: {supported_languages}\n"

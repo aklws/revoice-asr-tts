@@ -1,4 +1,6 @@
 # coding=utf-8
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright 2020 The Google AI Language Team Authors, Facebook AI Research authors and The HuggingFace Inc. team.
 # Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
 #
@@ -29,47 +31,16 @@ from transformers.cache_utils import (
     Cache,
     DynamicCache,
     EncoderDecoderCache,
+    OffloadedCache,
+    QuantizedCacheConfig,
     StaticCache,
 )
-try:
-    from transformers.cache_utils import OffloadedCache
-except ImportError:
-    OffloadedCache = None
-    import warnings
-    import transformers
-    warnings.warn(
-        "debug-point offloadedcache-missing: "
-        f"transformers={getattr(transformers, '__version__', 'unknown')} "
-        "cache_utils 中不存在 OffloadedCache，将回退到 DynamicCache。",
-        RuntimeWarning,
-    )
-    class OffloadedCache(DynamicCache):
-        pass
-try:
-    from transformers.cache_utils import QuantizedCacheConfig
-except ImportError:
-    class QuantizedCacheConfig:
-        pass
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 from transformers.modeling_outputs import CausalLMOutputWithPast, Seq2SeqLMOutput
-try:
-    from transformers.pytorch_utils import isin_mps_friendly
-except ImportError:
-    def isin_mps_friendly(elements, test_elements):
-        return torch.isin(elements, test_elements)
-try:
-    from transformers.tokenization_utils import ExtensionsTrie
-except ImportError:
-    class ExtensionsTrie:
-        """Minimal prefix trie used by token healing on newer transformers."""
-
-        def __init__(self, vocab):
-            self._tokens = list(vocab.keys()) if isinstance(vocab, dict) else list(vocab)
-
-        def extensions(self, prefix):
-            return [token for token in self._tokens if token.startswith(prefix)]
+from transformers.pytorch_utils import isin_mps_friendly
+from transformers.tokenization_utils import ExtensionsTrie
 from transformers.utils import (
     ModelOutput,
     is_accelerate_available,
@@ -80,52 +51,22 @@ from transformers.utils import (
     logging,
 )
 from transformers.generation.beam_constraints import DisjunctiveConstraint, PhrasalConstraint
-from transformers.generation.beam_search import BeamScorer, ConstrainedBeamSearchScorer
-from indextts.gpt.transformers_beam_search import BeamSearchScorer
+from transformers.generation.beam_search import BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer
 from transformers.generation.candidate_generator import (
     AssistedCandidateGenerator,
     AssistedCandidateGeneratorDifferentTokenizers,
     CandidateGenerator,
     PromptLookupCandidateGenerator,
+    _crop_past_key_values,
+    _prepare_attention_mask,
+    _prepare_token_type_ids,
 )
-
-try:
-    from transformers.generation.candidate_generator import _crop_past_key_values
-except ImportError:
-    def _crop_past_key_values(model, past_key_values, max_length):
-        if hasattr(past_key_values, "crop"):
-            past_key_values.crop(max_length)
-            return past_key_values
-        elif isinstance(past_key_values, tuple):
-            return tuple(
-                tuple(tensor[:, :, :max_length, ...] for tensor in layer)
-                for layer in past_key_values
-            )
-        return past_key_values
-
-try:
-    from transformers.generation.utils import _prepare_attention_mask, _prepare_token_type_ids
-except ImportError:
-    try:
-        from transformers.generation.candidate_generator import _prepare_attention_mask, _prepare_token_type_ids
-    except ImportError:
-        def _prepare_attention_mask(*args, **kwargs): pass
-        def _prepare_token_type_ids(*args, **kwargs): pass
-
-try:
-    from transformers.generation.configuration_utils import (
-        NEED_SETUP_CACHE_CLASSES_MAPPING,
-        QUANT_BACKEND_CLASSES_MAPPING,
-        GenerationConfig,
-        GenerationMode,
-    )
-except ImportError:
-    from transformers.generation.configuration_utils import (
-        GenerationConfig,
-        GenerationMode,
-    )
-    NEED_SETUP_CACHE_CLASSES_MAPPING = {}
-    QUANT_BACKEND_CLASSES_MAPPING = {}
+from transformers.generation.configuration_utils import (
+    NEED_SETUP_CACHE_CLASSES_MAPPING,
+    QUANT_BACKEND_CLASSES_MAPPING,
+    GenerationConfig,
+    GenerationMode,
+)
 from transformers.generation.logits_process import (
     EncoderNoRepeatNGramLogitsProcessor,
     EncoderRepetitionPenaltyLogitsProcessor,
@@ -1063,7 +1004,7 @@ class GenerationMixin:
                     device=device,
                 )
             )
-        if getattr(generation_config, "forced_decoder_ids", None) is not None:
+        if generation_config.forced_decoder_ids is not None:
             # TODO (sanchit): move this exception to GenerationConfig.validate() when TF & FLAX are aligned with PT
             raise ValueError(
                 "You have explicitly specified `forced_decoder_ids`. Please remove the `forced_decoder_ids` argument "
@@ -1243,7 +1184,7 @@ class GenerationMixin:
         >>> generated_tokens = outputs.sequences[:, input_length:]
         >>> for tok, score in zip(generated_tokens[0], transition_scores[0]):
         ...     # | token | token string | log probability | probability
-        ...     print(f"| {tok:5d} | {tokenizer.decode(tok):8s} | {score.numpy():.3f} | {np.exp(score.numpy()):.2%}")
+        ...     print_loguru(f"| {tok:5d} | {tokenizer.decode(tok):8s} | {score.numpy():.3f} | {np.exp(score.numpy()):.2%}")
         |   262 |  the     | -1.414 | 24.33%
         |  1110 |  day     | -2.609 | 7.36%
         |   618 |  when    | -2.010 | 13.40%
@@ -1269,7 +1210,7 @@ class GenerationMixin:
         >>> output_length = np.sum(transition_scores.numpy() < 0, axis=1)
         >>> length_penalty = model.generation_config.length_penalty
         >>> reconstructed_scores = transition_scores.sum(axis=1) / (output_length**length_penalty)
-        >>> print(np.allclose(outputs.sequences_scores, reconstructed_scores))
+        >>> print_loguru(np.allclose(outputs.sequences_scores, reconstructed_scores))
         True
         ```"""
         # 1. In absence of `beam_indices`, we can assume that we come from e.g. greedy search, which is equivalent
@@ -1887,10 +1828,10 @@ class GenerationMixin:
             if not is_torchdynamo_compiling():
                 if kwargs_has_attention_mask is not None and not kwargs_has_attention_mask:
                     logger.warning(
-                        "未设置 attention mask 和 pad token id，这可能导致意外行为。"
-                        "请传入输入的 `attention_mask` 以获得可靠结果。"
+                        "The attention mask and the pad token id were not set. As a consequence, you may observe "
+                        "unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results."
                     )
-                logger.warning("开放式生成时，已将 `pad_token_id` 设为 `eos_token_id`: {}", pad_token_tensor)
+                logger.warning(f"Setting `pad_token_id` to `eos_token_id`:{pad_token_tensor} for open-end generation.")
             pad_token_tensor = eos_token_tensor[0]
 
         # Sanity checks/warnings

@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import torch
 import numpy as np
 import re
@@ -35,8 +37,8 @@ class OpenVoiceBaseClass(object):
     def load_ckpt(self, ckpt_path):
         checkpoint_dict = torch.load(ckpt_path, map_location=torch.device(self.device))
         a, b = self.model.load_state_dict(checkpoint_dict['model'], strict=False)
-        print("Loaded checkpoint '{}'".format(ckpt_path))
-        print('missing/unexpected keys:', a, b)
+        print_loguru("Loaded checkpoint '{}'".format(ckpt_path))
+        print_loguru('missing/unexpected keys:', a, b)
 
 
 class BaseSpeakerTTS(OpenVoiceBaseClass):
@@ -65,9 +67,9 @@ class BaseSpeakerTTS(OpenVoiceBaseClass):
     @staticmethod
     def split_segments_into_pieces(text, language_str):
         texts = utils.split_segment(text, language_str=language_str)
-        print(" > Text split into segments.")
-        print('\n'.join(texts))
-        print(" > ===========================")
+        print_loguru(" > Text split into segments.")
+        print_loguru('\n'.join(texts))
+        print_loguru(" > ===========================")
         return texts
 
     def tts(self, text, output_path, speaker, language='English', speed=1.0):
@@ -155,7 +157,7 @@ class ToneColorConverter(OpenVoiceBaseClass):
         for n in range(n_repeat):
             trunck = audio[(coeff * n) * K: (coeff * n + 1) * K]
             if len(trunck) != K:
-                print('Audio too short, fail to add watermark')
+                print_loguru('Audio too short, fail to add watermark')
                 break
             message_npy = bits[n * 32: (n + 1) * 32]
             
@@ -174,7 +176,7 @@ class ToneColorConverter(OpenVoiceBaseClass):
         for n in range(n_repeat):
             trunck = audio[(coeff * n) * K: (coeff * n + 1) * K]
             if len(trunck) != K:
-                print('Audio too short, fail to detect watermark')
+                print_loguru('Audio too short, fail to detect watermark')
                 return 'Fail'
             with torch.no_grad():
                 signal = torch.FloatTensor(trunck).to(self.device).unsqueeze(0)

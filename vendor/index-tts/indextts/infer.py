@@ -1,3 +1,6 @@
+from indextts.utils.loguru_print import print_loguru
+
+
 import os
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
@@ -57,7 +60,7 @@ class IndexTTS:
             self.device = "cpu"
             self.use_fp16 = False
             self.use_cuda_kernel = False
-            print(">> Be patient, it may take a while to run in CPU mode.")
+            print_loguru(">> Be patient, it may take a while to run in CPU mode.")
 
         self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
@@ -76,7 +79,7 @@ class IndexTTS:
         #     self.dvae.eval().half()
         # else:
         #     self.dvae.eval()
-        # print(">> vqvae weights restored from:", self.dvae_path)
+        # print_loguru(">> vqvae weights restored from:", self.dvae_path)
         self.gpt = UnifiedVoice(**self.cfg.gpt)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
@@ -85,7 +88,7 @@ class IndexTTS:
             self.gpt.eval().half()
         else:
             self.gpt.eval()
-        print(">> GPT weights restored from:", self.gpt_path)
+        print_loguru(">> GPT weights restored from:", self.gpt_path)
         if self.use_fp16:
             try:
                 import deepspeed
@@ -93,7 +96,7 @@ class IndexTTS:
                 use_deepspeed = True
             except (ImportError, OSError, CalledProcessError) as e:
                 use_deepspeed = False
-                print(f">> DeepSpeed加载失败，回退到标准推理: {e}")
+                print_loguru(f">> DeepSpeed加载失败，回退到标准推理: {e}")
 
             self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=True)
         else:
@@ -105,9 +108,9 @@ class IndexTTS:
                 from indextts.BigVGAN.alias_free_activation.cuda import load
 
                 anti_alias_activation_cuda = load.load()
-                print(">> Preload custom CUDA kernel for BigVGAN", anti_alias_activation_cuda)
+                print_loguru(">> Preload custom CUDA kernel for BigVGAN", anti_alias_activation_cuda)
             except:
-                print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
+                print_loguru(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
                 self.use_cuda_kernel = False
         self.bigvgan = Generator(self.cfg.bigvgan, use_cuda_kernel=self.use_cuda_kernel)
         self.bigvgan_path = os.path.join(self.model_dir, self.cfg.bigvgan_checkpoint)
@@ -117,13 +120,13 @@ class IndexTTS:
         # remove weight norm on eval mode
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
-        print(">> bigvgan weights restored from:", self.bigvgan_path)
+        print_loguru(">> bigvgan weights restored from:", self.bigvgan_path)
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer()
         self.normalizer.load()
-        print(">> TextNormalizer loaded")
+        print_loguru(">> TextNormalizer loaded")
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
-        print(">> bpe model loaded from:", self.bpe_path)
+        print_loguru(">> bpe model loaded from:", self.bpe_path)
         # 缓存参考音频mel：
         self.cache_audio_prompt = None
         self.cache_cond_mel = None
@@ -207,7 +210,7 @@ class IndexTTS:
             for sent in sorted(outputs, key=lambda x: x["len"]):
                 current_sent_len = sent["len"]
                 if current_sent_len == 0:
-                    print(">> skip empty segment")
+                    print_loguru(">> skip empty segment")
                     continue
                 if last_bucket is None \
                         or current_sent_len >= int(last_bucket_sent_len_median * factor) \
@@ -232,7 +235,7 @@ class IndexTTS:
                     out_buckets.append(b)
             if len(only_ones) > 0:
                 # merge into previous buckets if possible
-                # print("only_ones:", [(o["idx"], o["len"]) for o in only_ones])
+                # print_loguru("only_ones:", [(o["idx"], o["len"]) for o in only_ones])
                 for i in range(len(out_buckets)):
                     b = out_buckets[i]
                     if len(b) < bucket_max_size:
@@ -291,11 +294,11 @@ class IndexTTS:
                 - 越大，bucket数量越少，batch越多，推理速度越*快*，占用内存更多，可能影响质量
                 - 越小，bucket数量越多，batch越少，推理速度越*慢*，占用内存和质量更接近于非快速推理
         """
-        print(">> starting fast inference...")
+        print_loguru(">> starting fast inference...")
 
         self._set_gr_progress(0, "starting fast inference...")
         if verbose:
-            print(f"origin text:{text}")
+            print_loguru(f"origin text:{text}")
         start_time = time.perf_counter()
 
         # 如果参考音频改变了，才需要重新生成 cond_mel, 提升速度
@@ -311,13 +314,13 @@ class IndexTTS:
             
             if audio.shape[1] > max_audio_samples:
                 if verbose:
-                    print(f"Audio too long ({audio.shape[1]} samples), truncating to {max_audio_samples} samples")
+                    print_loguru(f"Audio too long ({audio.shape[1]} samples), truncating to {max_audio_samples} samples")
                 audio = audio[:, :max_audio_samples]
 
             cond_mel = MelSpectrogramFeatures()(audio).to(self.device)
             cond_mel_frame = cond_mel.shape[-1]
             if verbose:
-                print(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
+                print_loguru(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
 
             self.cache_audio_prompt = audio_prompt
             self.cache_cond_mel = cond_mel
@@ -335,10 +338,10 @@ class IndexTTS:
         segments = self.tokenizer.split_segments(text_tokens_list,
                                                    max_text_tokens_per_segment=max_text_tokens_per_segment)
         if verbose:
-            print(">> text token count:", len(text_tokens_list))
-            print("   segments count:", len(segments))
-            print("   max_text_tokens_per_segment:", max_text_tokens_per_segment)
-            print(*segments, sep="\n")
+            print_loguru(">> text token count:", len(text_tokens_list))
+            print_loguru("   segments count:", len(segments))
+            print_loguru("   max_text_tokens_per_segment:", max_text_tokens_per_segment)
+            print_loguru(*segments, sep="\n")
         do_sample = generation_kwargs.pop("do_sample", True)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
@@ -363,7 +366,7 @@ class IndexTTS:
         all_segments = self.bucket_segments(segments, bucket_max_size=bucket_max_size)
         bucket_count = len(all_segments)
         if verbose:
-            print(">> segments bucket_count:", bucket_count,
+            print_loguru(">> segments bucket_count:", bucket_count,
                   "bucket sizes:", [(len(s), [t["idx"] for t in s]) for s in all_segments],
                   "bucket_max_size:", bucket_max_size)
         for segments in all_segments:
@@ -374,11 +377,11 @@ class IndexTTS:
                 text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
                 text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
                 if verbose:
-                    print(text_tokens)
-                    print(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
+                    print_loguru(text_tokens)
+                    print_loguru(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
                     # debug tokenizer
                     text_token_syms = self.tokenizer.convert_ids_to_tokens(text_tokens[0].tolist())
-                    print("text_token_syms is same as segment tokens", text_token_syms == sent)
+                    print_loguru("text_token_syms is same as segment tokens", text_token_syms == sent)
                 temp_tokens.append(text_tokens)
 
         # Sequential processing of bucketing data
@@ -432,13 +435,13 @@ class IndexTTS:
                     has_warned = True
                 codes = codes.unsqueeze(0)  # [x] -> [1, x]
                 if verbose:
-                    print("codes:", codes.shape)
-                    print(codes)
+                    print_loguru("codes:", codes.shape)
+                    print_loguru(codes)
                 codes, code_lens = self.remove_long_silence(codes, silent_token=52, max_consecutive=30)
                 if verbose:
-                    print("fix codes:", codes.shape)
-                    print(codes)
-                    print("code_lens:", code_lens)
+                    print_loguru("fix codes:", codes.shape)
+                    print_loguru(codes)
+                    print_loguru("code_lens:", code_lens)
                 text_tokens = batch_tokens[i]
                 all_idxs.append(batch_segments[i]["idx"])
                 m_start_time = time.perf_counter()
@@ -458,8 +461,8 @@ class IndexTTS:
         chunk_size = 2
         all_latents = [all_latents[all_idxs.index(i)] for i in range(len(all_latents))]
         if verbose:
-            print(">> all_latents:", len(all_latents))
-            print("  latents length:", [l.shape[1] for l in all_latents])
+            print_loguru(">> all_latents:", len(all_latents))
+            print_loguru("  latents length:", [l.shape[1] for l in all_latents])
         chunk_latents = [all_latents[i: i + chunk_size] for i in range(0, len(all_latents), chunk_size)]
         chunk_length = len(chunk_latents)
         latent_length = len(all_latents)
@@ -490,16 +493,16 @@ class IndexTTS:
         self._set_gr_progress(0.9, "saving audio...")
         wav = torch.cat(wavs, dim=1)
         wav_length = wav.shape[-1] / sampling_rate
-        print(f">> Reference audio length: {cond_mel_frame * 256 / sampling_rate:.2f} seconds")
-        print(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
-        print(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
-        print(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
-        print(f">> Total fast inference time: {end_time - start_time:.2f} seconds")
-        print(f">> Generated audio length: {wav_length:.2f} seconds")
-        print(f">> [fast] bigvgan chunk_length: {chunk_length}")
-        print(f">> [fast] batch_num: {all_batch_num} bucket_max_size: {bucket_max_size}",
+        print_loguru(f">> Reference audio length: {cond_mel_frame * 256 / sampling_rate:.2f} seconds")
+        print_loguru(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
+        print_loguru(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
+        print_loguru(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
+        print_loguru(f">> Total fast inference time: {end_time - start_time:.2f} seconds")
+        print_loguru(f">> Generated audio length: {wav_length:.2f} seconds")
+        print_loguru(f">> [fast] bigvgan chunk_length: {chunk_length}")
+        print_loguru(f">> [fast] batch_num: {all_batch_num} bucket_max_size: {bucket_max_size}",
               f"bucket_count: {bucket_count}" if bucket_max_size > 1 else "")
-        print(f">> [fast] RTF: {(end_time - start_time) / wav_length:.4f}")
+        print_loguru(f">> [fast] RTF: {(end_time - start_time) / wav_length:.4f}")
 
         # save audio
         wav = wav.cpu()  # to cpu
@@ -507,7 +510,7 @@ class IndexTTS:
             # 直接保存音频到指定路径中
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
-            print(">> wav file saved to:", output_path)
+            print_loguru(">> wav file saved to:", output_path)
             return output_path
         else:
             # 返回以符合Gradio的格式要求
@@ -516,12 +519,12 @@ class IndexTTS:
             return (sampling_rate, wav_data)
 
     # 原始推理模式
-    def infer(self, audio_prompt, text, output_path, verbose=False, max_text_tokens_per_segment=80,
+    def infer(self, audio_prompt, text, output_path, verbose=False, max_text_tokens_per_segment=120,
               **generation_kwargs):
-        print(">> starting inference...")
+        print_loguru(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
-            print(f"origin text:{text}")
+            print_loguru(f"origin text:{text}")
         start_time = time.perf_counter()
 
         # 如果参考音频改变了，才需要重新生成 cond_mel, 提升速度
@@ -534,7 +537,7 @@ class IndexTTS:
             cond_mel = MelSpectrogramFeatures()(audio).to(self.device)
             cond_mel_frame = cond_mel.shape[-1]
             if verbose:
-                print(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
+                print_loguru(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
 
             self.cache_audio_prompt = audio_prompt
             self.cache_cond_mel = cond_mel
@@ -548,10 +551,10 @@ class IndexTTS:
         text_tokens_list = self.tokenizer.tokenize(text)
         segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment)
         if verbose:
-            print("text token count:", len(text_tokens_list))
-            print("segments count:", len(segments))
-            print("max_text_tokens_per_segment:", max_text_tokens_per_segment)
-            print(*segments, sep="\n")
+            print_loguru("text token count:", len(text_tokens_list))
+            print_loguru("segments count:", len(segments))
+            print_loguru("max_text_tokens_per_segment:", max_text_tokens_per_segment)
+            print_loguru(*segments, sep="\n")
         do_sample = generation_kwargs.pop("do_sample", True)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
@@ -577,14 +580,14 @@ class IndexTTS:
             # text_tokens = F.pad(text_tokens, (1, 0), value=0)
             # text_tokens = F.pad(text_tokens, (0, 1), value=1)
             if verbose:
-                print(text_tokens)
-                print(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
+                print_loguru(text_tokens)
+                print_loguru(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
                 # debug tokenizer
                 text_token_syms = self.tokenizer.convert_ids_to_tokens(text_tokens[0].tolist())
-                print("text_token_syms is same as segment tokens", text_token_syms == sent)
+                print_loguru("text_token_syms is same as segment tokens", text_token_syms == sent)
 
             # text_len = torch.IntTensor([text_tokens.size(1)], device=text_tokens.device)
-            # print(text_len)
+            # print_loguru(text_len)
             progress += 1
             self._set_gr_progress(0.2 + 0.4 * (progress - 1) / len(segments),
                                   f"gpt latents inference {progress}/{len(segments)}...")
@@ -617,17 +620,17 @@ class IndexTTS:
 
                 code_lens = torch.tensor([codes.shape[-1]], device=codes.device, dtype=codes.dtype)
                 if verbose:
-                    print(codes, type(codes))
-                    print(f"codes shape: {codes.shape}, codes type: {codes.dtype}")
-                    print(f"code len: {code_lens}")
+                    print_loguru(codes, type(codes))
+                    print_loguru(f"codes shape: {codes.shape}, codes type: {codes.dtype}")
+                    print_loguru(f"code len: {code_lens}")
 
                 # remove ultra-long silence if exits
                 # temporarily fix the long silence bug.
                 codes, code_lens = self.remove_long_silence(codes, silent_token=52, max_consecutive=30)
                 if verbose:
-                    print(codes, type(codes))
-                    print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
-                    print(f"code len: {code_lens}")
+                    print_loguru(codes, type(codes))
+                    print_loguru(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
+                    print_loguru(f"code len: {code_lens}")
                 self._set_gr_progress(0.2 + 0.4 * progress / len(segments),
                                       f"gpt speech inference {progress}/{len(segments)}...")
                 m_start_time = time.perf_counter()
@@ -649,20 +652,20 @@ class IndexTTS:
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
-                    print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
+                    print_loguru(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
                 # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
         end_time = time.perf_counter()
         self._set_gr_progress(0.9, "saving audio...")
         wav = torch.cat(wavs, dim=1)
         wav_length = wav.shape[-1] / sampling_rate
-        print(f">> Reference audio length: {cond_mel_frame * 256 / sampling_rate:.2f} seconds")
-        print(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
-        print(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
-        print(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
-        print(f">> Total inference time: {end_time - start_time:.2f} seconds")
-        print(f">> Generated audio length: {wav_length:.2f} seconds")
-        print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
+        print_loguru(f">> Reference audio length: {cond_mel_frame * 256 / sampling_rate:.2f} seconds")
+        print_loguru(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
+        print_loguru(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
+        print_loguru(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
+        print_loguru(f">> Total inference time: {end_time - start_time:.2f} seconds")
+        print_loguru(f">> Generated audio length: {wav_length:.2f} seconds")
+        print_loguru(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
 
         # save audio
         wav = wav.cpu()  # to cpu
@@ -670,11 +673,11 @@ class IndexTTS:
             # 直接保存音频到指定路径中
             if os.path.isfile(output_path):
                 os.remove(output_path)
-                print(">> remove old wav file:", output_path)
+                print_loguru(">> remove old wav file:", output_path)
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
-            print(">> wav file saved to:", output_path)
+            print_loguru(">> wav file saved to:", output_path)
             return output_path
         else:
             # 返回以符合Gradio的格式要求

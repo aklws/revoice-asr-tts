@@ -9,6 +9,7 @@ THEME_OPTIONS: tuple[tuple[str, str], ...] = (
 
 _THEME_PALETTES: dict[str, dict[str, str]] = {
     "dark": {
+        "app_bg": "#090b10",
         "widget_bg": "#0f1115",
         "window_bg": "#090b10",
         "group_bg": "#131722",
@@ -48,7 +49,11 @@ _THEME_PALETTES: dict[str, dict[str, str]] = {
         "hero_chip_bg": "#161f31",
         "hero_chip_border": "#31435f",
         "hero_chip_text": "#dbe7ff",
+        "hero_chip_muted_text": "#95a2b8",
         "accent_soft": "#7fb0ff",
+        "primary_text": "#f8fafc",
+        "slider_thumb_bg": "#f8fafc",
+        "slider_thumb_border": "#5d92ff",
         "success_bg": "#0f1c19",
         "success_border": "#25493d",
         "success_text": "#b7f7d8",
@@ -71,6 +76,7 @@ _THEME_PALETTES: dict[str, dict[str, str]] = {
         "editor_bg": "#0b0f17",
     },
     "light": {
+        "app_bg": "#edf2f9",
         "widget_bg": "#f3f6fb",
         "window_bg": "#edf2f9",
         "group_bg": "#ffffff",
@@ -110,7 +116,11 @@ _THEME_PALETTES: dict[str, dict[str, str]] = {
         "hero_chip_bg": "#eef4ff",
         "hero_chip_border": "#cdddf8",
         "hero_chip_text": "#24457d",
+        "hero_chip_muted_text": "#607089",
         "accent_soft": "#3b82f6",
+        "primary_text": "#f8fafc",
+        "slider_thumb_bg": "#ffffff",
+        "slider_thumb_border": "#2c66dc",
         "success_bg": "#eefcf5",
         "success_border": "#bee7d2",
         "success_text": "#175b3b",
@@ -135,14 +145,18 @@ _THEME_PALETTES: dict[str, dict[str, str]] = {
 }
 
 
+def get_theme_palette(theme_name: str) -> dict[str, str]:
+    return dict(_THEME_PALETTES.get(theme_name, _THEME_PALETTES[DEFAULT_THEME]))
+
+
 def get_theme_stylesheet(theme_name: str) -> str:
-    palette = _THEME_PALETTES.get(theme_name, _THEME_PALETTES[DEFAULT_THEME])
+    palette = get_theme_palette(theme_name)
     return """
 QWidget {{
     background: {widget_bg};
     color: {text};
     font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-    font-size: 12px;
+    font-size: 11px;
 }}
 
 QMainWindow {{
@@ -169,7 +183,7 @@ QGroupBox::title {{
     padding: 0 8px;
     color: {group_title};
     background: transparent;
-    font-size: 13px;
+    font-size: 12px;
 }}
 
 QLineEdit,
@@ -249,47 +263,54 @@ QLabel {{
 
 QLabel#HeroTitle {{
     color: {hero_title};
-    font-size: 26px;
+    font-size: 16px;
     font-weight: 800;
+}}
+
+QLabel#HeroInlineSubtitle {{
+    color: {muted_text};
+    font-size: 10px;
+    font-weight: 500;
 }}
 
 QLabel#HeroSubtitle,
 QLabel#SectionHint,
 QLabel#VirtualHint {{
     color: {muted_text};
-    font-size: 12px;
+    font-size: 11px;
 }}
 
 QFrame#TopHeader {{
     background: qlineargradient(
         x1: 0, y1: 0, x2: 1, y2: 1,
         stop: 0 {hero_card_bg},
-        stop: 1 {surface_bg}
+        stop: 0.55 {surface_bg_alt},
+        stop: 1 {window_bg}
     );
     border: 1px solid {hero_card_border};
-    border-radius: 14px;
+    border-radius: 16px;
 }}
 
-QLabel#HeroEyebrow {{
-    color: {accent_soft};
+QWidget#HeaderMetrics {{
+    background: transparent;
+}}
+
+QWidget#HeaderActions {{
+    background: transparent;
+    border: none;
+}}
+
+QWidget#HeaderActions QComboBox {{
+    min-width: 104px;
+    padding: 6px 10px;
     font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 1px;
-}}
-
-QLabel#StatChip {{
-    color: {hero_chip_text};
-    background: {hero_chip_bg};
-    border: 1px solid {hero_chip_border};
-    border-radius: 8px;
-    padding: 4px 8px;
-    font-size: 12px;
     font-weight: 600;
+    border-radius: 10px;
 }}
 
 QLabel#SectionLead {{
     color: {text};
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
 }}
 
@@ -299,6 +320,19 @@ QFrame#DashboardTile {{
     background: {surface_bg_alt};
     border: 1px solid {surface_border};
     border-radius: 12px;
+}}
+
+QFrame#TopHeader QFrame#SummaryCard {{
+    background: {hero_chip_bg};
+    border: 1px solid {hero_chip_border};
+}}
+
+QFrame#TopHeader QLabel#SummaryCaption {{
+    color: {hero_chip_muted_text};
+}}
+
+QFrame#TopHeader QLabel#SummaryValue {{
+    color: {hero_chip_text};
 }}
 
 QFrame#DashboardTile:hover {{
@@ -316,7 +350,7 @@ QLabel#SummaryCaption,
 QLabel#DetailCaption,
 QLabel#DashboardCaption {{
     color: {muted_text};
-    font-size: 11px;
+    font-size: 8px;
     font-weight: 600;
 }}
 
@@ -324,8 +358,48 @@ QLabel#SummaryValue,
 QLabel#DetailValue,
 QLabel#DashboardValue {{
     color: {text};
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
+}}
+
+QWidget#HeaderRuntimeBadge {{
+    background: transparent;
+    border: none;
+}}
+
+QLabel#HeaderRuntimeDot {{
+    color: {success_text};
+    font-size: 11px;
+    font-weight: 800;
+}}
+
+QLabel#HeaderRuntimeStatus {{
+    color: {success_text};
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+QLabel#HeaderRuntimeStatus[state="busy"] {{
+    color: {warning_text};
+}}
+
+QLabel#HeaderRuntimeStatus[state="error"] {{
+    color: {error_text};
+}}
+
+QLabel#HeaderRuntimeStatus[state="ready"] {{
+    color: {success_text};
+}}
+
+QLabel#HeaderRuntimeClock {{
+    color: {muted_text};
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+QFrame#TopHeader QPushButton#IconButton {{
+    padding: 6px;
+    border-radius: 10px;
 }}
 
 QLabel#SummaryValue[state="official"] {{
@@ -342,9 +416,16 @@ QLabel#SummaryValue[state="custom"] {{
 
 QLabel#CompactLabel {{
     color: {muted_text};
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     padding-left: 2px;
+}}
+
+QLabel#InlineValueLabel {{
+    color: {text};
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 34px;
 }}
 
 QLabel#StatusBadge {{
@@ -357,7 +438,7 @@ QLabel#StatusBadge {{
     border: 1px solid {primary_border};
     border-radius: 16px;
     padding: 8px 14px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     min-width: 64px;
 }}
@@ -393,6 +474,58 @@ QFrame#EmotionSidebar {{
     padding-right: 12px;
 }}
 
+QFrame#SpeechRateCard {{
+    background: {surface_bg_alt};
+    border: 1px solid {surface_border};
+    border-radius: 12px;
+}}
+
+QLabel#SpeechRateTitle {{
+    color: {text};
+    font-size: 12px;
+    font-weight: 700;
+}}
+
+QLabel#SpeechRateHint {{
+    color: {muted_text};
+    font-size: 10px;
+    line-height: 1.4;
+}}
+
+QFrame#OutputPanelSection {{
+    background: rgba(9, 16, 30, 0.68);
+    border: 1px solid {surface_border};
+    border-radius: 16px;
+}}
+
+QFrame#OutputPanelSection QLineEdit,
+QFrame#OutputPanelSection QComboBox {{
+    min-height: 20px;
+    padding: 10px 12px;
+    border-radius: 12px;
+}}
+
+QPushButton#OutputActionButton {{
+    background: {button_bg};
+    color: {text};
+    border: 1px solid {button_border};
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+QPushButton#OutputActionButton:hover {{
+    background: {button_hover};
+    border: 1px solid {button_hover_border};
+}}
+
+QLabel#OutputMetaLabel {{
+    color: {muted_text};
+    font-size: 10px;
+    line-height: 1.5;
+}}
+
 QFrame#EmotionSliderCard:hover {{
     border: 1px solid {button_hover_border};
 }}
@@ -403,20 +536,56 @@ QLabel#WorkspaceBadge {{
     border: 1px solid {hero_chip_border};
     border-radius: 9px;
     padding: 7px 12px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     min-width: 74px;
 }}
 
+QLabel#WorkspaceRunBadge {{
+    background: {hero_chip_bg};
+    color: {hero_chip_text};
+    border: 1px solid {hero_chip_border};
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+QLabel#WorkspaceRunBadge[state="busy"] {{
+    background: {warning_bg};
+    color: {warning_text};
+    border: 1px solid {warning_border};
+}}
+
+QLabel#WorkspaceRunBadge[state="error"] {{
+    background: {error_bg};
+    color: {error_text};
+    border: 1px solid {error_border};
+}}
+
 QLabel#WorkspaceStat {{
     color: {muted_text};
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
+}}
+
+QLabel#WorkspaceStateLine {{
+    color: {muted_text};
+    font-size: 11px;
+    padding: 2px 2px 6px 2px;
+}}
+
+QLabel#WorkspaceStateLine[state="error"] {{
+    color: {error_text};
+}}
+
+QLabel#WorkspaceStateLine[state="ready"] {{
+    color: {muted_text};
 }}
 
 QLabel#CardTitle {{
     color: {group_title};
-    font-size: 15px;
+    font-size: 12px;
     font-weight: 700;
 }}
 
@@ -430,7 +599,7 @@ QLabel#LiveStatusLabel {{
     border: 1px solid {warning_border};
     border-radius: 10px;
     padding: 12px;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 700;
 }}
 
@@ -452,7 +621,7 @@ QLabel#ModeBadge {{
     border: 1px solid {hero_chip_border};
     border-radius: 9px;
     padding: 8px 12px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     min-width: 86px;
 }}
@@ -463,7 +632,7 @@ QPushButton#ModeToggleButton {{
     border: 1px solid {surface_border};
     border-radius: 10px;
     padding: 8px 12px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
 }}
 
@@ -495,17 +664,72 @@ QTextEdit#TranscriptView {{
     selection-background-color: {primary_start};
 }}
 
+QPushButton#WorkspaceGhostButton {{
+    background: transparent;
+    color: {hero_chip_text};
+    border: none;
+    border-radius: 10px;
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+QPushButton#WorkspaceGhostButton:hover {{
+    color: {text};
+    border: none;
+    background: transparent;
+}}
+
+QPushButton#WorkspaceGhostButton:pressed {{
+    color: {primary_end};
+    border: none;
+    background: transparent;
+}}
+
+QProgressBar#LevelMeter {{
+    min-height: 8px;
+    max-height: 8px;
+    border: 1px solid {surface_border};
+    border-radius: 4px;
+    background: {button_disabled_border};
+}}
+
+QProgressBar#LevelMeter::chunk {{
+    border-radius: 4px;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #22c55e,
+        stop: 0.7 #84cc16,
+        stop: 1 #eab308
+    );
+}}
+
 QLabel#EmotionSliderName {{
     color: {text};
-    font-size: 12px;
+    font-size: 10px;
     font-weight: 600;
+}}
+
+QLabel#EmotionEmojiBadge {{
+    color: {muted_text};
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 11px;
+    background: {surface_bg_alt};
+    border: 1px solid {surface_border};
 }}
 
 QLabel#EmotionSliderValue {{
     color: {muted_text};
-    font-size: 12px;
+    font-size: 10px;
     font-weight: 700;
-    min-width: 40px;
+    min-width: 34px;
+}}
+
+QFrame#EmotionVectorItem {{
+    background: {surface_bg_alt};
+    border: 1px solid {surface_border};
+    border-radius: 8px;
 }}
 
 QPushButton#PrimaryActionButton {{
@@ -516,7 +740,7 @@ QPushButton#PrimaryActionButton {{
     );
     color: #ffffff;
     border: 1px solid {primary_border};
-    font-size: 15px;
+    font-size: 13px;
     padding: 14px 18px;
 }}
 
@@ -542,17 +766,19 @@ QPushButton#IconButton {{
 }}
 
 QPushButton#EmotionPresetButton {{
-    background: {surface_bg};
-    color: {text};
+    background: {surface_bg_alt};
+    color: {muted_text};
     border: 1px solid {surface_border};
-    border-radius: 10px;
-    padding: 8px 10px;
-    font-size: 12px;
+    border-radius: 6px;
+    padding: 3px 4px;
+    font-size: 9px;
     font-weight: 700;
 }}
 
 QPushButton#EmotionPresetButton:hover {{
     border: 1px solid {button_hover_border};
+    color: {text};
+    background: {surface_bg};
 }}
 
 QPushButton#EmotionPresetButton:checked {{
@@ -569,10 +795,10 @@ QPushButton#EmotionNavButton {{
     background: transparent;
     color: {muted_text};
     border: none;
-    border-radius: 8px;
-    padding: 10px 14px;
+    border-radius: 6px;
+    padding: 6px 8px;
     text-align: left;
-    font-size: 13px;
+    font-size: 9px;
     font-weight: 600;
 }}
 
@@ -640,8 +866,8 @@ QSlider::sub-page:horizontal {{
 }}
 
 QSlider::handle:horizontal {{
-    background: {hero_title};
-    border: 2px solid {primary_border};
+    background: {slider_thumb_bg};
+    border: 2px solid {slider_thumb_border};
     width: 18px;
     height: 18px;
     margin: -7px 0;
@@ -650,8 +876,8 @@ QSlider::handle:horizontal {{
 
 QSlider::groove:vertical {{
     background: {surface_border};
-    width: 6px;
-    border-radius: 3px;
+    width: 4px;
+    border-radius: 2px;
 }}
 
 QSlider::add-page:vertical {{
@@ -660,23 +886,23 @@ QSlider::add-page:vertical {{
         stop: 0 {primary_start},
         stop: 1 {primary_end}
     );
-    width: 6px;
-    border-radius: 3px;
+    width: 4px;
+    border-radius: 2px;
 }}
 
 QSlider::sub-page:vertical {{
     background: {surface_border};
-    width: 6px;
-    border-radius: 3px;
+    width: 4px;
+    border-radius: 2px;
 }}
 
 QSlider::handle:vertical {{
-    background: {hero_title};
-    border: 2px solid {primary_border};
-    width: 18px;
-    height: 18px;
-    margin: 0 -6px;
-    border-radius: 9px;
+    background: {slider_thumb_bg};
+    border: 2px solid {slider_thumb_border};
+    width: 14px;
+    height: 14px;
+    margin: 0 -5px;
+    border-radius: 7px;
 }}
 
 QSplitter::handle {{

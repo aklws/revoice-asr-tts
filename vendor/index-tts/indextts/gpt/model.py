@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import functools
 
 import torch
@@ -5,26 +7,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import transformers
-from transformers.generation.utils import GenerationMixin
 from transformers import GPT2Config, LogitsProcessorList
 from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
-try:
-    from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
-except ImportError:
-    def get_device_map(num_layers, devices):
-        device_list = list(devices)
-        if not device_list:
-            device_list = [0]
-        return {device_list[0]: list(range(num_layers))}
-
-    def assert_device_map(device_map, num_layers):
-        assigned = sorted(layer for layers in device_map.values() for layer in layers)
-        expected = list(range(num_layers))
-        if assigned != expected:
-            raise ValueError(f"device_map must cover all layers exactly once: expected={expected}, got={assigned}")
+from transformers.utils.model_parallel_utils import (assert_device_map,
+                                                     get_device_map)
 
 from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
@@ -55,7 +44,7 @@ class ResBlock(nn.Module):
         return F.relu(self.net(x) + x)
 
 
-class GPT2InferenceModel(GPT2PreTrainedModel, GenerationMixin):
+class GPT2InferenceModel(GPT2PreTrainedModel):
     def __init__(self, config, gpt, text_pos_emb, embeddings, norm, linear, kv_cache=False):
         super().__init__(config)
         # Note: the argument named `text_pos_emb` here actually represents the mel position embedding
@@ -280,9 +269,6 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
                             n_layer=layers,
                             n_head=heads,
                             activation_function=activation_function or "gelu_new",
-                            bos_token_id=None,
-                            eos_token_id=None,
-                            pad_token_id=None,
                             gradient_checkpointing=checkpointing,
                             use_cache=not checkpointing)
     gpt = GPT2Model(gpt_config)
@@ -415,9 +401,6 @@ class UnifiedVoice(nn.Module):
             n_embd=self.model_dim,
             n_layer=self.layers,
             n_head=self.heads,
-            bos_token_id=self.start_mel_token,
-            eos_token_id=self.stop_mel_token,
-            pad_token_id=self.stop_mel_token,
             gradient_checkpointing=False,
             use_cache=True,
         )
@@ -596,7 +579,7 @@ class UnifiedVoice(nn.Module):
         mel_emb = mel_emb + self.mel_pos_embedding(mel_codes)
 
         if text_first:
-            # print(f"conds: {conds.shape}, text_emb: {text_emb.shape}, mel_emb: {mel_emb.shape}")
+            # print_loguru(f"conds: {conds.shape}, text_emb: {text_emb.shape}, mel_emb: {mel_emb.shape}")
             text_logits, mel_logits = self.get_logits(conds, text_emb, self.text_head, mel_emb, self.mel_head, get_attns=return_attentions, return_latent=return_latent)
             if return_latent:
                 return mel_logits[:, :-2]  # Despite the name, these are not logits. Strip off the two tokens added by this forward pass.

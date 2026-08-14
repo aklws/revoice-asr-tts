@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import math
 import torch
 from torch import nn
@@ -291,7 +293,7 @@ class Generator(torch.nn.Module):
         return x
 
     def remove_weight_norm(self):
-        print("Removing weight norm...")
+        print_loguru("Removing weight norm...")
         for layer in self.ups:
             remove_weight_norm(layer)
         for layer in self.resblocks:

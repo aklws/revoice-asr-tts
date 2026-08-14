@@ -22,7 +22,7 @@ import torch
 
 from transformers.utils import add_start_docstrings
 from transformers.generation.beam_constraints import Constraint, ConstraintListState
-from loguru import logger
+
 
 PROCESS_INPUTS_DOCSTRING = r"""
     Args:

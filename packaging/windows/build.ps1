@@ -1,7 +1,7 @@
 ﻿param(
-    [string]$AppVersion = "0.0.6",
+    [string]$AppVersion = "",
     [switch]$NoUpx,
-    [switch]$IncludeBundledFfmpeg,
+    [switch]$NoBundledFfmpeg,
     [switch]$DryRun
 )
 
@@ -9,30 +9,50 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+$pyprojectPath = Join-Path $repoRoot "pyproject.toml"
 $venvDir = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $helperScript = Join-Path $scriptDir "build_cython_bundle.py"
 $entryScript = Join-Path $repoRoot "main.py"
-$packageName = "Revoice-ASR-TTS-v$appVersion"
 $launcherName = "Launch-Revoice-ASR-TTS.bat"
 $distRoot = Join-Path $repoRoot "dist"
-$packageDir = Join-Path $distRoot $packageName
 $buildRoot = Join-Path $repoRoot "build\cython_bundle"
 $compiledRoot = Join-Path $buildRoot "compiled"
 $compiledBuildRoot = Join-Path $buildRoot "cython_build"
 $appIcon = Join-Path $repoRoot "ui\assets\revoice_asr_tts.ico"
 $appIconPng = Join-Path $repoRoot "ui\assets\revoice_asr_tts.png"
 $projectReadmeZh = Join-Path $repoRoot "README.md"
-$projectReadmeEn = Join-Path $repoRoot "README.en.md"
+$projectReadmeEn = Join-Path $repoRoot "README.en-US.md"
 $pyprojectSource = Join-Path $repoRoot "pyproject.toml"
 $uvLockSource = Join-Path $repoRoot "uv.lock"
 $envExampleSource = Join-Path $repoRoot ".env.example"
 $assetDir = Join-Path $repoRoot "asset"
-$assetExcludeFiles = @("*.mp3", "*.wav", "*.ogg", "*.flac", "*.m4a", "*.aac", "*.wma")
+$assetExcludeFiles = @("*.mp3", "*.wav", "*.ogg", "*.flac", "*.m4a", "*.aac", "*.wma","*.mp4")
 $ffmpegDir = Join-Path $repoRoot "bin\ffmpeg"
 $flashAttnDir = Join-Path $repoRoot "bin\flash_attn"
 $vendorRoot = Join-Path $repoRoot "vendor"
 $upxCommand = Get-Command upx -ErrorAction SilentlyContinue
+
+function Get-AppVersionFromPyProject([string]$filePath) {
+    if (-not (Test-Path $filePath)) {
+        throw "未找到 pyproject.toml: $filePath"
+    }
+
+    foreach ($line in Get-Content $filePath -Encoding UTF8) {
+        if ($line -match '^\s*version\s*=\s*"([^"]+)"\s*$') {
+            return $Matches[1]
+        }
+    }
+
+    throw "无法从 pyproject.toml 解析版本号: $filePath"
+}
+
+if ([string]::IsNullOrWhiteSpace($AppVersion)) {
+    $AppVersion = Get-AppVersionFromPyProject $pyprojectPath
+}
+
+$packageName = "Revoice-ASR-TTS-v$AppVersion"
+$packageDir = Join-Path $distRoot $packageName
 
 function Stop-ProcessesInDirectory([string]$targetDir) {
     if (-not (Test-Path $targetDir)) {
@@ -234,10 +254,18 @@ function Invoke-UpxCompression([string]$targetDir, [string]$upxExePath) {
     $skippedCount = 0
 
     foreach ($candidate in $candidates) {
-        $upxOutput = & $upxExePath --best --lzma $candidate.FullName 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $upxOutput = (& $upxExePath --best --lzma $candidate.FullName 2>&1 | Out-String)
+            $upxExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($upxExitCode -eq 0) {
             $compressedCount += 1
-        } elseif (($upxOutput | Out-String) -match "AlreadyPackedException") {
+        } elseif ($upxOutput -match "AlreadyPackedException|NotCompressibleException") {
             $skippedCount += 1
         } else {
             $skippedCount += 1
@@ -302,17 +330,17 @@ Invoke-RobocopyCopy $compiledRoot $packageDir @("__pycache__", "cy", "tmp", "bui
 
 Copy-FileIfExists $entryScript (Join-Path $packageDir "main.py")
 Copy-FileIfExists $projectReadmeZh (Join-Path $packageDir "README.md")
-Copy-FileIfExists $projectReadmeEn (Join-Path $packageDir "README.en.md")
+Copy-FileIfExists $projectReadmeEn (Join-Path $packageDir "README.en-US.md")
 Copy-FileIfExists $pyprojectSource (Join-Path $packageDir "pyproject.toml")
 Copy-FileIfExists $uvLockSource (Join-Path $packageDir "uv.lock")
 Copy-FileIfExists $envExampleSource (Join-Path $packageDir ".env.example")
 
-if ($IncludeBundledFfmpeg -and (Test-Path $ffmpegDir)) {
+if ($NoBundledFfmpeg) {
+    Write-Host "Skipping bundled ffmpeg copy because -NoBundledFfmpeg was specified."
+} elseif (Test-Path $ffmpegDir) {
     Invoke-RobocopyCopy $ffmpegDir (Join-Path $packageDir "bin\ffmpeg") @("__pycache__")
-} elseif ($IncludeBundledFfmpeg) {
-    Write-Warning "已指定 -IncludeBundledFfmpeg，但未找到本地 ffmpeg 目录: $ffmpegDir"
 } else {
-    Write-Host "Skipping bundled ffmpeg copy by default. Install ffmpeg separately or place it under bin\\ffmpeg manually if needed."
+    Write-Warning "默认需要打包本地 ffmpeg，但未找到目录: $ffmpegDir"
 }
 if (Test-Path $flashAttnDir) {
     Invoke-RobocopyCopy $flashAttnDir (Join-Path $packageDir "bin\flash_attn") @("__pycache__")

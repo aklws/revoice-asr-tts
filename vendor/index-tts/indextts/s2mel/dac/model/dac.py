@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 import math
 from typing import List
 from typing import Union
@@ -369,8 +371,8 @@ if __name__ == "__main__":
         p = sum([np.prod(p.size()) for p in m.parameters()])
         fn = lambda o, p: o + f" {p/1e6:<.3f}M params."
         setattr(m, "extra_repr", partial(fn, o=o, p=p))
-    print(model)
-    print("Total # of params: ", sum([np.prod(p.size()) for p in model.parameters()]))
+    print_loguru(model)
+    print_loguru("Total # of params: ", sum([np.prod(p.size()) for p in model.parameters()]))
 
     length = 88200 * 2
     x = torch.randn(1, 1, length).to(model.device)
@@ -379,8 +381,8 @@ if __name__ == "__main__":
 
     # Make a forward pass
     out = model(x)["audio"]
-    print("Input shape:", x.shape)
-    print("Output shape:", out.shape)
+    print_loguru("Input shape:", x.shape)
+    print_loguru("Output shape:", out.shape)
 
     # Create gradient variable
     grad = torch.zeros_like(out)
@@ -394,7 +396,7 @@ if __name__ == "__main__":
     gradmap = (gradmap != 0).sum(0)  # sum across features
     rf = (gradmap != 0).sum()
 
-    print(f"Receptive field: {rf.item()}")
+    print_loguru(f"Receptive field: {rf.item()}")
 
     x = AudioSignal(torch.randn(1, 1, 44100 * 60), 44100)
     model.decompress(model.compress(x, verbose=True), verbose=True)

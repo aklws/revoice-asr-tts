@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2024 Alibaba Inc (authors: Xiang Lyu, Kai Hu)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -436,7 +438,7 @@ class HiFTGenerator(nn.Module):
         return x
 
     def remove_weight_norm(self):
-        print('Removing weight norm...')
+        print_loguru('Removing weight norm...')
         for l in self.ups:
             remove_weight_norm(l)
         for l in self.resblocks:

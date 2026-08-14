@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2023 Amphion.
 #
 # This source code is licensed under the MIT license found in the
@@ -79,7 +81,7 @@ class FAcodecInference(object):
             self.cfg.preprocess_params.sr,
         )
 
-        print(
+        print_loguru(
             "Reconstructed audio saved as: ",
             f"{output_dir}/reconstructed_{source_name}.wav",
         )
@@ -131,7 +133,7 @@ class FAcodecInference(object):
             self.cfg.preprocess_params.sr,
         )
 
-        print(
+        print_loguru(
             "Voice conversion results saved as: ",
             f"{output_dir}/converted_{source_name}_to_{reference_name}.wav",
         )

@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 from transformers import SeamlessM4TFeatureExtractor
 from transformers import Wav2Vec2BertModel
 import torch
@@ -140,9 +142,9 @@ if __name__=='__main__':
     speech_path = 'test/magi1.wav'
     speech = librosa.load(speech_path, sr=16000)[0]
     speech = np.c_[speech,speech,speech].T #[2, 198559] 
-    print(speech.shape)
+    print_loguru(speech.shape)
             
     Extract_feature = Extract_wav2vectbert('cuda:0')
     semantic_code,rec_feat = Extract_feature.feature_extract(speech)
-    print(semantic_code.shape,rec_feat.shape)
+    print_loguru(semantic_code.shape,rec_feat.shape)
     

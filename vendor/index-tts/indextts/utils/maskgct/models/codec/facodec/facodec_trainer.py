@@ -1,3 +1,5 @@
+from indextts.utils.loguru_print import print_loguru
+
 # Copyright (c) 2023 Amphion.
 #
 # This source code is licensed under the MIT license found in the
@@ -42,7 +44,7 @@ from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 try:
     import nemo.collections.asr as nemo_asr
 except ImportError:
-    print(
+    print_loguru(
         "Unable to import nemo_asr, titanet outputs will be set to random values, you may only run debugging mode. DO NOT USE THIS FOR TRAINING"
     )
     nemo_asr = None
@@ -321,7 +323,7 @@ class FAcodecTrainer(CodecTrainer):
             # Save checkpoints
             self.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process and save_checkpoint:
-                print("Saving..")
+                print_loguru("Saving..")
                 state = {
                     "net": {key: self.model[key].state_dict() for key in self.model},
                     "optimizer": self.optimizer.state_dict(),
@@ -355,7 +357,7 @@ class FAcodecTrainer(CodecTrainer):
                     self.step,
                 ),
             )
-            print("Saving..")
+            print_loguru("Saving..")
             state = {
                 "net": {key: self.model[key].state_dict() for key in self.model},
                 "optimizer": self.optimizer.state_dict(),
@@ -751,7 +753,7 @@ class FAcodecTrainer(CodecTrainer):
                     and len(available_checkpoints) > 4
                 ):
                     os.remove(earliest_checkpoint)
-                    print(f"Removed {earliest_checkpoint}")
+                    print_loguru(f"Removed {earliest_checkpoint}")
             else:
                 latest_checkpoint = checkpoint_path
 

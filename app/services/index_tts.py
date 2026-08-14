@@ -17,19 +17,35 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from app.core import get_indextts_vendor_loader
 from app.core.config import (
-    default_index_tts_model_dir,
     get_settings,
     resolve_index_tts_model_dir,
     resolve_tts_device,
 )
+from app.core.index_tts_files import get_index_tts_missing_files
 from app.core.logging import get_logger
 from app.core.runtime import release_memory
 from app.core.audio import resample_waveform
-
+from app.services.translation import detect_text_language
 logger = get_logger(__name__)
 _DEFAULT_FIRST_CHUNK_WARMUP_TEXT = "你好，欢迎使用。"
 _JAPANESE_FIRST_CHUNK_WARMUP_TEXT = "こんにちは。"
+_INDEX_TTS_V25_LANGUAGE_TOKENS: dict[str, str] = {
+    "zh": "ZH",
+    "en": "EN",
+    "ja": "JA",
+    "es": "ES",
+    "ar": "AR",
+}
+_DEFAULT_INDEX_TTS_LANGUAGE = "zh"
+_INDEX_TTS_V25_MAX_MEL_TOKENS = 1500
+
+
+def _resolve_tts_language_token(text: str | None) -> tuple[str, str]:
+    language = detect_text_language(str(text or "").strip()) or _DEFAULT_INDEX_TTS_LANGUAGE
+    normalized = language if language in _INDEX_TTS_V25_LANGUAGE_TOKENS else _DEFAULT_INDEX_TTS_LANGUAGE
+    return normalized, _INDEX_TTS_V25_LANGUAGE_TOKENS[normalized]
 
 
 def _sanitize_text(text: str) -> str:
@@ -40,6 +56,27 @@ def _sanitize_text(text: str) -> str:
     if not text.endswith((".", "!", "?", "。", "！", "？")):
         text += "."
     return text
+
+
+def _split_stream_text(text: str, max_chars: int = 24) -> list[str]:
+    parts = re.split(r'(?<=[，。！？、；：,\.!\?;:\n])', text)
+    chunks: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if len(part) <= max_chars:
+            chunks.append(part)
+            continue
+        current = ""
+        for ch in part:
+            if current and len(current) >= max_chars:
+                chunks.append(current)
+                current = ch
+            else:
+                current += ch
+        if current:
+            chunks.append(current)
+    return chunks or [text]
 
 
 def _select_warmup_text(model_dir: Path) -> str:
@@ -59,71 +96,37 @@ def _select_warmup_text(model_dir: Path) -> str:
     return _DEFAULT_FIRST_CHUNK_WARMUP_TEXT
 
 
-def _is_japanese_model_dir(model_dir: Path) -> bool:
-    hints = " ".join((model_dir.name, str(model_dir))).lower()
-    return "japanese" in hints or re.search(r"(^|[-_/])ja($|[-_/])", hints) is not None
+def _normalize_stream_audio_item(item: Any) -> np.ndarray | None:
+    if item is None or isinstance(item, tuple):
+        return None
+    if isinstance(item, torch.Tensor):
+        tensor = item.detach()
+        wav = tensor.numpy() if tensor.device.type == "cpu" else tensor.cpu().numpy()
+    elif isinstance(item, np.ndarray):
+        wav = item
+    else:
+        wav = np.array(item)
+    if wav.ndim == 1:
+        wav = wav[:, None]
+    elif wav.ndim == 2 and wav.shape[0] < wav.shape[1]:
+        wav = wav.T
+    if wav.dtype == np.int16:
+        wav = wav.astype(np.float32) / 32768.0
+    elif wav.dtype != np.float32:
+        wav = wav.astype(np.float32)
+    elif np.max(np.abs(wav)) > 2.0:
+        wav = wav.astype(np.float32, copy=False) / 32768.0
+    return wav
 
 
-def _link_or_copy_file(src: Path, dst: Path) -> None:
-    if dst.exists() or not src.exists():
+def _assert_index_tts_model_files_ready(model_dir: Path) -> None:
+    missing_files = get_index_tts_missing_files(model_dir, local_only=True)
+    if not missing_files:
         return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(src, dst)
-        logger.info("已为兼容布局创建硬链接: {} -> {}", dst, src)
-        return
-    except OSError:
-        pass
-    shutil.copy2(src, dst)
-    logger.info("已为兼容布局复制文件: {} -> {}", src, dst)
-
-
-def _copytree_if_missing(src: Path, dst: Path, *, required_entries: tuple[str, ...] | None = None) -> None:
-    if not src.exists():
-        return
-    if dst.exists():
-        if required_entries is None:
-            return
-        missing_entries = [entry for entry in required_entries if not (dst / entry).exists()]
-        if not missing_entries:
-            return
-    shutil.copytree(src, dst, dirs_exist_ok=True)
-    logger.info("已为兼容布局复制目录: {} -> {}", src, dst)
-
-
-def _ensure_japanese_model_layout(model_dir: Path) -> None:
-    if not _is_japanese_model_dir(model_dir):
-        return
-
-    official_model_dir = default_index_tts_model_dir("IndexTeam/IndexTTS-2")
-    if not official_model_dir.exists():
-        logger.warning("日语模型依赖官方 IndexTTS-2 基础目录，但当前未找到: {}", official_model_dir)
-        return
-
-    logger.info("检测到日语增量模型目录，正在补齐官方基础文件...")
-
-    # Japanese incremental packages commonly ship only a replaced GPT checkpoint
-    # and tokenizer model, while the rest of the runtime still expects the
-    # standard IndexTTS-2 filenames/layout.
-    _link_or_copy_file(model_dir / "model_jp_163000.pth", model_dir / "gpt.pth")
-    _link_or_copy_file(model_dir / "japanese_bpe.model", model_dir / "bpe.model")
-
-    for filename in ("feat1.pt", "feat2.pt", "s2mel.pth", "wav2vec2bert_stats.pt"):
-        _link_or_copy_file(official_model_dir / filename, model_dir / filename)
-
-    _copytree_if_missing(
-        official_model_dir / "qwen0.6bemo4-merge",
-        model_dir / "qwen0.6bemo4-merge",
-    )
-    _copytree_if_missing(
-        official_model_dir / "hf_cache" / "w2v-bert-2.0",
-        model_dir / "hf_cache" / "w2v-bert-2.0",
-        required_entries=(
-            "config.json",
-            "configuration.json",
-            "model.safetensors",
-            "preprocessor_config.json",
-        ),
+    raise FileNotFoundError(
+        "当前 IndexTTS-2.5 模型目录不完整，缺少以下文件："
+        f"{', '.join(missing_files)}。"
+        "请先在“模型下载”中手动下载对应模型，程序不会自动下载。"
     )
 
 
@@ -162,8 +165,8 @@ def _normalize_transformers_aux_configs(model_dir: Path) -> None:
 
 @cache
 def _load_indextts2_class() -> type[Any]:
-    """按需加载 IndexTTS2，避免模块导入阶段就触发重型依赖初始化。"""
-    module = importlib.import_module("indextts.infer_v2")
+    """按需加载 IndexTTS 2.5，避免模块导入阶段就触发重型依赖初始化。"""
+    module = get_indextts_vendor_loader().import_module("indextts.infer_v2_5")
     return module.IndexTTS2
 
 
@@ -209,22 +212,44 @@ def _activate_msvc_environment(vcvars_bat: Path) -> bool:
 
 
 def _find_windows_msvc() -> tuple[str | None, str | None]:
-    candidates: list[Path] = []
+    env_compiler = _resolve_msvc_from_environment()
+    if env_compiler is not None:
+        return env_compiler, "CC 环境变量"
+    path_compiler = shutil.which("cl")
+    if path_compiler:
+        return path_compiler, "PATH"
 
+    candidates = _collect_msvc_candidates()
+    resolved = _resolve_existing_msvc_candidate(candidates)
+    if resolved is not None:
+        os.environ.setdefault("CC", str(resolved))
+        os.environ.setdefault("CXX", str(resolved))
+        return str(resolved), "Visual Studio Build Tools"
+    return None, None
+
+
+def _resolve_msvc_from_environment() -> str | None:
     env_cl = os.environ.get("CC")
     if env_cl and Path(env_cl).exists():
-        return env_cl, "CC 环境变量"
+        return env_cl
+    return None
 
-    found = shutil.which("cl")
-    if found:
-        return found, "PATH"
 
+def _collect_msvc_candidates() -> list[Path]:
+    candidates: list[Path] = []
     vc_tools_dir = os.environ.get("VCToolsInstallDir")
     if vc_tools_dir:
         candidates.extend(Path(vc_tools_dir).glob(r"bin/Hostx64/x64/cl.exe"))
-
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    candidates.extend(_collect_msvc_candidates_from_vswhere(program_files_x86))
+    if not candidates:
+        candidates.extend(_collect_msvc_candidates_from_standard_roots(program_files_x86))
+    return candidates
+
+
+def _collect_msvc_candidates_from_vswhere(program_files_x86: str) -> list[Path]:
     vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    candidates: list[Path] = []
     if vswhere.exists():
         try:
             query = subprocess.run(
@@ -246,46 +271,42 @@ def _find_windows_msvc() -> tuple[str | None, str | None]:
             )
             install_dir = query.stdout.strip()
             if install_dir:
-                install_path = Path(install_dir)
-                vcvars64 = install_path / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-                if vcvars64.exists():
-                    _activate_msvc_environment(vcvars64)
-                candidates.extend(
-                    sorted(
-                        install_path.glob(r"VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"),
-                        reverse=True,
-                    )
-                )
+                candidates.extend(_collect_install_path_msvc_candidates(Path(install_dir)))
         except Exception as exc:
             logger.debug("通过 vswhere 查询 MSVC 失败: {}", exc)
+    return candidates
 
-    if not candidates:
-        vs_roots = [
-            Path(program_files_x86) / "Microsoft Visual Studio",
-            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Microsoft Visual Studio",
-        ]
-        editions = ("BuildTools", "Community", "Professional", "Enterprise")
-        years = ("2022", "2019", "2017")
-        for root in vs_roots:
-            for year in years:
-                for edition in editions:
-                    install_path = root / year / edition
-                    vcvars64 = install_path / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-                    if vcvars64.exists():
-                        _activate_msvc_environment(vcvars64)
-                    candidates.extend(
-                        sorted(
-                            install_path.glob(r"VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"),
-                            reverse=True,
-                        )
-                    )
 
+def _collect_msvc_candidates_from_standard_roots(program_files_x86: str) -> list[Path]:
+    candidates: list[Path] = []
+    vs_roots = [
+        Path(program_files_x86) / "Microsoft Visual Studio",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Microsoft Visual Studio",
+    ]
+    editions = ("BuildTools", "Community", "Professional", "Enterprise")
+    years = ("2022", "2019", "2017")
+    for root in vs_roots:
+        for year in years:
+            for edition in editions:
+                candidates.extend(_collect_install_path_msvc_candidates(root / year / edition))
+    return candidates
+
+
+def _collect_install_path_msvc_candidates(install_path: Path) -> list[Path]:
+    vcvars64 = install_path / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    if vcvars64.exists():
+        _activate_msvc_environment(vcvars64)
+    return sorted(
+        install_path.glob(r"VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"),
+        reverse=True,
+    )
+
+
+def _resolve_existing_msvc_candidate(candidates: list[Path]) -> Path | None:
     for candidate in candidates:
         if candidate.exists():
-            os.environ.setdefault("CC", str(candidate))
-            os.environ.setdefault("CXX", str(candidate))
-            return str(candidate), "Visual Studio Build Tools"
-    return None, None
+            return candidate
+    return None
 
 
 def _configure_c_compiler() -> tuple[bool, str]:
@@ -313,7 +334,7 @@ def _configure_c_compiler() -> tuple[bool, str]:
 
 class IndexTTSService:
 
-    """Lightweight wrapper around indextts.infer_v2.IndexTTS2 for text-to-speech."""
+    """Lightweight wrapper around indextts.infer_v2_5.IndexTTS2 for text-to-speech."""
 
     def __init__(self, model_dir: Path | None = None) -> None:
         self.model_dir = model_dir or resolve_index_tts_model_dir()
@@ -340,13 +361,13 @@ class IndexTTSService:
                 return
             if not self.model_dir.exists():
                 raise FileNotFoundError(
-                    "IndexTTS-2 model directory not found. Set INDEX_TTS_MODEL_DIR or place the model under "
+                    "IndexTTS-2.5 model directory not found. Set INDEX_TTS_MODEL_DIR or place the model under "
                     f"{resolve_index_tts_model_dir()}."
                 )
             config_path = self.model_dir / "config.yaml"
             if not config_path.exists():
-                raise FileNotFoundError(f"IndexTTS-2 config not found: {config_path}")
-            _ensure_japanese_model_layout(self.model_dir)
+                raise FileNotFoundError(f"IndexTTS-2.5 config not found: {config_path}")
+            _assert_index_tts_model_files_ready(self.model_dir)
             _normalize_transformers_aux_configs(self.model_dir)
 
             use_accel = self._use_accel_gpt
@@ -367,19 +388,29 @@ class IndexTTSService:
                     use_torch_compile = False
             else:
                 logger.info("实验性进阶模式未启用，使用常规推理路径。")
+            if not use_torch_compile and self._use_torch_compile:
+                logger.info("IndexTTS 将跳过 torch.compile / inductor autotune，直接使用常规推理。")
 
-            logger.info("正在加载 IndexTTS-2 模型 (设备={})", self.device)
+            logger.info(
+                "正在加载 IndexTTS-2.5 模型 (设备={} 模式=多语言自动识别)",
+                self.device,
+            )
             index_tts_cls = _load_indextts2_class()
+            use_bf16 = bool(
+                str(self.device).startswith("cuda")
+                and torch.cuda.is_available()
+                and torch.cuda.is_bf16_supported()
+            )
             self._tts = index_tts_cls(
                 cfg_path=str(config_path),
                 model_dir=self._model_dir_str,
-                use_fp16=True,
+                use_bf16=use_bf16,
                 device=self.device if str(self.device).startswith("cuda") else None,
                 use_cuda_kernel=True,
                 use_accel=use_accel,
                 use_torch_compile=use_torch_compile,
             )
-            logger.info("IndexTTS-2 加载完成")
+            logger.info("IndexTTS-2.5 加载完成")
 
     def warmup_speaker(self, reference_audio_path: str, emo_vector: list[float] | None = None) -> None:
         """后台预热参考音色与首段生成链，降低首次出声延迟。"""
@@ -387,52 +418,71 @@ class IndexTTSService:
             with self._use_tts(required=False) as tts:
                 if tts is None:
                     return
-                logger.info("正在预热 TTS 参考音频特征: {}", reference_audio_path)
-                try:
-                    # 先做一次极短文本推理，强制缓存参考音色特征。
-                    gen = tts.infer(
-                        spk_audio_prompt=reference_audio_path,
-                        text=".",
-                        output_path="",
-                        verbose=False,
-                        emo_vector=emo_vector,
-                        stream_return=True,
-                    )
-                    for _ in gen:
-                        pass
-                    logger.info("TTS 参考音色特征预热完成")
-                except Exception as e:
-                    logger.warning("TTS 参考音频预热失败: {}", e)
-
-                logger.info("正在预热 TTS 首段生成链路: {}", self._warmup_text)
-                warmup_stream = None
-                try:
-                    warmup_stream = tts.infer(
-                        spk_audio_prompt=reference_audio_path,
-                        text=self._warmup_text,
-                        output_path="",
-                        verbose=False,
-                        emo_vector=emo_vector,
-                        stream_return=True,
-                        max_text_tokens_per_segment=80,
-                        quick_streaming_tokens=80,
-                    )
-                    for item in warmup_stream:
-                        if item is None:
-                            break
-                        if isinstance(item, tuple):
-                            break
-                        logger.info("TTS 首段生成链路预热完成")
-                        break
-                except Exception as e:
-                    logger.warning("TTS 首段生成链路预热失败: {}", e)
-                finally:
-                    if warmup_stream is not None:
-                        close_fn = getattr(warmup_stream, "close", None)
-                        if callable(close_fn):
-                            close_fn()
+                self._warmup_reference_features(tts, reference_audio_path, emo_vector)
+                self._warmup_first_stream_chunk(tts, reference_audio_path, emo_vector)
         finally:
             release_memory()
+
+    def _warmup_reference_features(self, tts: Any, reference_audio_path: str, emo_vector: list[float] | None) -> None:
+        logger.info("正在预热 TTS 参考音频特征: {}", reference_audio_path)
+        try:
+            _, language_token = _resolve_tts_language_token(".")
+            gen = tts.infer(
+                spk_audio_prompt=reference_audio_path,
+                text=".",
+                output_path="",
+                lang=language_token,
+                verbose=False,
+                emo_vector=emo_vector,
+                stream_return=True,
+            )
+            self._consume_warmup_stream(gen, stop_after_first_audio=False)
+            logger.info("TTS 参考音色特征预热完成")
+        except Exception as exc:
+            logger.warning("TTS 参考音频预热失败: {}", exc)
+
+    def _warmup_first_stream_chunk(self, tts: Any, reference_audio_path: str, emo_vector: list[float] | None) -> None:
+        logger.info("正在预热 TTS 首段生成链路: {}", self._warmup_text)
+        warmup_stream = None
+        try:
+            detected_language, language_token = _resolve_tts_language_token(self._warmup_text)
+            warmup_stream = tts.infer(
+                spk_audio_prompt=reference_audio_path,
+                text=self._warmup_text,
+                output_path="",
+                lang=language_token,
+                verbose=False,
+                emo_vector=emo_vector,
+                stream_return=True,
+                max_text_tokens_per_segment=80,
+                max_mel_tokens=_INDEX_TTS_V25_MAX_MEL_TOKENS,
+                more_segment_before=80,
+            )
+            if self._consume_warmup_stream(warmup_stream, stop_after_first_audio=True):
+                logger.info("TTS 首段生成链路预热完成 (lang={})", detected_language)
+        except Exception as exc:
+            logger.warning("TTS 首段生成链路预热失败: {}", exc)
+        finally:
+            self._close_stream_if_possible(warmup_stream)
+
+    @staticmethod
+    def _consume_warmup_stream(stream: Any, *, stop_after_first_audio: bool) -> bool:
+        saw_audio = False
+        for item in stream:
+            if item is None or isinstance(item, tuple):
+                break
+            saw_audio = True
+            if stop_after_first_audio:
+                break
+        return saw_audio
+
+    @staticmethod
+    def _close_stream_if_possible(stream: Any) -> None:
+        if stream is None:
+            return
+        close_fn = getattr(stream, "close", None)
+        if callable(close_fn):
+            close_fn()
 
 
     def unload(self) -> None:
@@ -454,62 +504,11 @@ class IndexTTSService:
                     del obj
             del tts
             release_memory()
-            logger.info("IndexTTS-2 已卸载")
+            logger.info("IndexTTS-2.5 已卸载")
         finally:
             with self._lock:
                 self._unload_in_progress = False
                 self._state_changed.notify_all()
-
-    def extract_voiceprints_batch(self, audio_list: list[np.ndarray], sample_rate: int) -> np.ndarray:
-        """批量提取 CAM++ 声纹向量，返回 shape=(N, 192) 的 float32 数组。"""
-        with self._use_tts() as tts:
-            if not audio_list:
-                return np.empty((0, 192), dtype=np.float32)
-
-            torchaudio = _load_torchaudio()
-            feature_tensors: list[torch.Tensor] = []
-            max_frame_count = 0
-
-            for audio_np in audio_list:
-                if sample_rate != 16000:
-                    audio_np = resample_waveform(audio_np, sample_rate, 16000)
-
-                if audio_np.ndim > 1:
-                    audio_np = audio_np.mean(axis=1)
-
-                audio_tensor = torch.from_numpy(audio_np.astype(np.float32, copy=False)).unsqueeze(0)
-                feat = torchaudio.compliance.kaldi.fbank(
-                    audio_tensor,
-                    num_mel_bins=80,
-                    dither=0,
-                    sample_frequency=16000,
-                )
-                feat = feat - feat.mean(dim=0, keepdim=True)
-                feature_tensors.append(feat)
-                max_frame_count = max(max_frame_count, int(feat.shape[0]))
-
-            if not feature_tensors or max_frame_count <= 0:
-                return np.empty((0, 192), dtype=np.float32)
-
-            batch_size = len(feature_tensors)
-            feature_batch = torch.zeros((batch_size, max_frame_count, 80), dtype=torch.float32)
-            for index, feat in enumerate(feature_tensors):
-                frame_count = int(feat.shape[0])
-                feature_batch[index, :frame_count, :] = feat
-
-            with torch.no_grad():
-                if hasattr(tts, "_compute_campplus_style"):
-                    style = tts._compute_campplus_style(feature_batch)
-                else:
-                    style = tts.campplus_model(feature_batch.to(tts.device))
-                return style.cpu().numpy().astype(np.float32, copy=False)
-            
-    def extract_voiceprint(self, audio_np: np.ndarray, sample_rate: int) -> list[float]:
-        """Extract a 192-dimensional voiceprint embedding using CAM++."""
-        embeddings = self.extract_voiceprints_batch([audio_np], sample_rate)
-        if embeddings.shape[0] == 0:
-            raise RuntimeError("未能提取声纹向量。")
-        return embeddings[0].tolist()
 
     # ------------------------------------------------------------------ #
     #  synthesize
@@ -523,25 +522,30 @@ class IndexTTSService:
         *,
         emo_vector: list[float] | None = None,
         emo_alpha: float = 1.0,
+        duration_factor: float = 1.0,
     ) -> tuple[np.ndarray, int]:
         text = _sanitize_text(text)
         if not text:
             raise ValueError("TTS 文本为空。")
+        detected_language, language_token = _resolve_tts_language_token(text)
 
         logger.info(
-            "IndexTTS-2 推理: text={!r}, ref={}, emo_vector={}, emo_alpha={}",
-            text[:80], reference_audio_path, emo_vector, emo_alpha,
+            "IndexTTS-2.5 推理: text={!r}, ref={}, lang={}, emo_vector={}, emo_alpha={}, duration_factor={}",
+            text[:80], reference_audio_path, detected_language, emo_vector, emo_alpha, duration_factor,
         )
 
         try:
-            with self._use_tts(error_message="IndexTTS-2 服务尚未加载，请先调用 .load()。") as tts:
+            with self._use_tts(error_message="IndexTTS-2.5 服务尚未加载，请先调用 .load()。") as tts:
                 result = tts.infer(
                     spk_audio_prompt=reference_audio_path,
                     text=text,
                     output_path=output_path or "",
+                    lang=language_token,
                     verbose=False,
                     emo_vector=emo_vector,
                     emo_alpha=emo_alpha,
+                    duration_factor=max(0.5, min(2.0, float(duration_factor))),
+                    max_mel_tokens=_INDEX_TTS_V25_MAX_MEL_TOKENS,
                     max_text_tokens_per_segment=80,
                 )
 
@@ -552,7 +556,7 @@ class IndexTTSService:
             elif isinstance(result, tuple) and len(result) == 2:
                 sample_rate, wav = result
             else:
-                raise RuntimeError(f"Unexpected IndexTTS-2 infer result type: {type(result)}")
+                raise RuntimeError(f"Unexpected IndexTTS-2.5 infer result type: {type(result)}")
 
             if not isinstance(wav, np.ndarray):
                 wav = np.array(wav)
@@ -578,58 +582,44 @@ class IndexTTSService:
         *,
         emo_vector: list[float] | None = None,
         emo_alpha: float = 1.0,
+        duration_factor: float = 1.0,
     ):
         """Streaming synthesis: yields (audio_chunk_np, sample_rate) per segment."""
         text = _sanitize_text(text)
         if not text:
             raise ValueError("TTS 文本为空。")
+        detected_language, language_token = _resolve_tts_language_token(text)
 
-        text_chunks = [text]
+        text_chunks = _split_stream_text(text)
         logger.info(
-            "IndexTTS-2 流式推理: text={!r}, ref={}, chunks={}",
-            text[:80], reference_audio_path, len(text_chunks),
+            "IndexTTS-2.5 流式推理: text={!r}, ref={}, lang={}, chunks={}, duration_factor={}",
+            text[:80], reference_audio_path, detected_language, len(text_chunks), duration_factor,
         )
 
         sample_rate = 22050
         try:
             with self._use_tts() as tts:
                 for chunk_index, text_chunk in enumerate(text_chunks, start=1):
-                    logger.debug("IndexTTS-2 流式分块 {}/{}: {!r}", chunk_index, len(text_chunks), text_chunk)
+                    logger.debug("IndexTTS-2.5 流式分块 {}/{}: {!r}", chunk_index, len(text_chunks), text_chunk)
                     gen = tts.infer(
                         spk_audio_prompt=reference_audio_path,
                         text=text_chunk,
                         output_path="",
+                        lang=language_token,
                         verbose=False,
                         emo_vector=emo_vector,
                         emo_alpha=emo_alpha,
                         stream_return=True,
+                        duration_factor=max(0.5, min(2.0, float(duration_factor))),
+                        max_mel_tokens=_INDEX_TTS_V25_MAX_MEL_TOKENS,
                         max_text_tokens_per_segment=80,
-                        quick_streaming_tokens=80,
+                        more_segment_before=80,
                     )
 
                     for item in gen:
-                        if item is None:
+                        wav = _normalize_stream_audio_item(item)
+                        if wav is None:
                             break
-                        if isinstance(item, tuple):
-                            break  # (sampling_rate, wav) — end of stream
-                        if isinstance(item, torch.Tensor):
-                            tensor = item.detach()
-                            wav = tensor.numpy() if tensor.device.type == "cpu" else tensor.cpu().numpy()
-                        elif isinstance(item, np.ndarray):
-                            wav = item
-                        else:
-                            wav = np.array(item)
-                        if wav.ndim == 1:
-                            wav = wav[:, None]
-                        elif wav.ndim == 2 and wav.shape[0] < wav.shape[1]:
-                            wav = wav.T
-                        # IndexTTS yields float32 clamped to int16 range; normalize to [-1, 1]
-                        if wav.dtype == np.int16:
-                            wav = wav.astype(np.float32) / 32768.0
-                        elif wav.dtype != np.float32:
-                            wav = wav.astype(np.float32)
-                        elif np.max(np.abs(wav)) > 2.0:
-                            wav = wav.astype(np.float32, copy=False) / 32768.0
                         yield wav, sample_rate
         finally:
             release_memory()
@@ -639,7 +629,7 @@ class IndexTTSService:
         self,
         *,
         required: bool = True,
-        error_message: str = "IndexTTS-2 service is not loaded. Call .load() first.",
+        error_message: str = "IndexTTS-2.5 service is not loaded. Call .load() first.",
     ):
         tts: Any | None = None
         with self._lock:
