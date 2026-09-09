@@ -30,6 +30,7 @@ $assetDir = Join-Path $repoRoot "asset"
 $assetExcludeFiles = @("*.mp3", "*.wav", "*.ogg", "*.flac", "*.m4a", "*.aac", "*.wma","*.mp4")
 $ffmpegDir = Join-Path $repoRoot "bin\ffmpeg"
 $flashAttnDir = Join-Path $repoRoot "bin\flash_attn"
+$uvLocalExe = Join-Path $repoRoot "bin\uv\uv.exe"
 $vendorRoot = Join-Path $repoRoot "vendor"
 $upxCommand = Get-Command upx -ErrorAction SilentlyContinue
 
@@ -150,39 +151,14 @@ function Copy-FileIfExists([string]$sourcePath, [string]$targetPath) {
 }
 
 function Write-LauncherScript([string]$launcherPath) {
-    $content = @"
-@echo off
-setlocal
-set "APP_ROOT=%~dp0"
-if "%APP_ROOT:~-1%"=="\" set "APP_ROOT=%APP_ROOT:~0,-1%"
-where uv >nul 2>nul
-if errorlevel 1 (
-    echo.
-    echo 未检测到 uv。请先安装 uv: https://docs.astral.sh/uv/getting-started/installation/
-    exit /b 1
-)
-pushd "%APP_ROOT%"
-set "UV_PROJECT_ENVIRONMENT=%APP_ROOT%\.venv"
-set "PYTHONPATH=%APP_ROOT%"
-set "PATH=%APP_ROOT%\bin\ffmpeg\bin;%APP_ROOT%\bin\ffmpeg;%PATH%"
-set "PYTHONUTF8=1"
-uv sync --frozen
-if errorlevel 1 (
-    echo.
-    echo uv sync failed.
-    popd
-    exit /b 1
-)
-uv run python "%APP_ROOT%\main.py" %*
-set "EXIT_CODE=%ERRORLEVEL%"
-popd
-if not "%EXIT_CODE%"=="0" (
-    echo.
-    echo Revoice exited with code %EXIT_CODE%.
-)
-exit /b %EXIT_CODE%
-"@
-    Set-Content -Path $launcherPath -Value $content -Encoding Default
+    # Launcher template lives in the repo next to this script so there is a
+    # single source of truth. The template expects a bundled uv.exe next to
+    # the launcher (%APP_ROOT%\uv.exe) and falls back to system uv when absent.
+    $template = Join-Path $scriptDir $launcherName
+    if (-not (Test-Path $template)) {
+        throw "未找到启动脚本模板: $template"
+    }
+    Copy-Item -Path $template -Destination $launcherPath -Force
 }
 
 function Test-UpxSafeTarget([string]$filePath) {
@@ -217,7 +193,8 @@ function Test-UpxSafeTarget([string]$filePath) {
         "arrow*.dll",
         "parquet*.dll",
         "opencv*.dll",
-        "ffmpeg*.exe"
+        "ffmpeg*.exe",
+        "uv.exe"
     )
     foreach ($pattern in $blockedNamePatterns) {
         if ($fileName -like $pattern) {
@@ -363,6 +340,23 @@ New-Item -ItemType Directory -Force -Path $outputsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $checkpointsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 Write-LauncherScript $launcherPath
+
+$packageUvExe = Join-Path $packageDir "uv.exe"
+$uvSource = $null
+if (Test-Path $uvLocalExe) {
+    $uvSource = $uvLocalExe
+} else {
+    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uvCommand -and (Test-Path $uvCommand.Source)) {
+        $uvSource = $uvCommand.Source
+    }
+}
+if ($uvSource) {
+    Copy-Item -Path $uvSource -Destination $packageUvExe -Force
+    Write-Host "Bundled uv executable: $uvSource"
+} else {
+    Write-Warning "未找到可内置的 uv.exe（已尝试 $uvLocalExe 与 PATH 上的 uv）。启动脚本会退回系统 uv 探测逻辑；建议将 uv.exe 放到 bin\uv\uv.exe 后重新打包。"
+}
 
 if (-not (Test-Path $launcherPath)) {
     throw "启动脚本生成失败: $launcherPath"
